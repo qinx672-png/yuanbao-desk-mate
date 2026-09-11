@@ -1,0 +1,54 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    font-size: 16px;
+  }
+  body {
+    @apply bg-[#eaeef5] text-ink-900 font-sans antialiased;
+    margin: 0;
+  }
+  /* 无障碍：键盘焦点可见 */
+  :focus-visible {
+    outline: 3px solid #59b0ff;
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  /* 触控目标不小于 44px，符合中小学生使用的可点击区域规范 */
+  .tap {
+    @apply min-h-[44px] inline-flex items-center justify-center;
+  }
+  .card {
+    @apply bg-white rounded-2xl shadow-card;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-xs font-medium;
+  }
+  .btn-primary {
+    @apply tap w-full rounded-2xl bg-brand-500 px-4 text-white font-semibold shadow-[0_4px_14px_rgba(47,144,245,.32)]
+           active:scale-[.98] transition;
+  }
+  .btn-ghost {
+    @apply tap w-full rounded-2xl border-2 border-brand-200 bg-white px-4 text-brand-700 font-semibold
+           active:scale-[.98] transition;
+  }
+  .scroll-area {
+    @apply overflow-y-auto;
+    scrollbar-width: thin;
+  }
+  .scroll-area::-webkit-scrollbar {
+    width: 5px;
+  }
+  .scroll-area::-webkit-scrollbar-thumb {
+    @apply bg-ink-200 rounded-full;
+  }
+}
+
+/* 夜间护眼模式：降低蓝光与亮度，非强制 */
+.eye-care {
+  filter: sepia(0.16) brightness(0.96) saturate(0.92);
+}
