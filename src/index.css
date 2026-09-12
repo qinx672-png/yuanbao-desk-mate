@@ -52,3 +52,18 @@
 .eye-care {
   filter: sepia(0.16) brightness(0.96) saturate(0.92);
 }
+
+/* 手表端打点的反馈：真机上是震动，屏幕上画成一圈荡开的涟漪 */
+@keyframes watchRipple {
+  0% {
+    transform: scale(0.72);
+    opacity: 0.9;
+  }
+  100% {
+    transform: scale(2);
+    opacity: 0;
+  }
+}
+.watch-ripple {
+  animation: watchRipple 0.85s ease-out forwards;
+}

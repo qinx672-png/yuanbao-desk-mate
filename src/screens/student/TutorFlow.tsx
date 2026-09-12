@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import type { Bubble, ScriptNode, Stage, GuideDepth, ExitOption } from '@/types'
+import type { Bubble, ScriptNode, Stage, GuideDepth, ExitOption, FallbackLoopStep } from '@/types'
 import {
   script,
   answerChoices,
@@ -8,7 +8,8 @@ import {
   guideDepths,
   depthRewrite,
   depthHint,
-  fallbackLoop,
+  fallbackLoopFor,
+  noErrorChallengeReply,
   exitOptions,
   interestContexts,
 } from '@/data/mockData'
@@ -147,14 +148,26 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
     enter(node.id, d)
   }
 
-  /** 容错四步闭环：学生指出讲错了 → 发现 / 承认 / 修复 / 沉淀 */
+  /**
+   * 容错四步闭环：学生指出讲错了 → 发现 / 承认 / 修复 / 沉淀
+   *
+   * 分两条路，这是这次修掉的关键一处：
+   *  · 这一步真的埋了错（node.error）→ 走完整四步，而且「承认」里
+   *    引用的是它**真说过的那句原话**，不是套话；
+   *  · 这一步没问题 → 如实说自己核对过，而不是顺着学生改口。
+   *    学生也会质疑错。一律认错那是讨好 —— 孩子会学到
+   *    「只要我坚持，它就会承认」，那比讲错一次更麻烦。
+   */
   const challenge = () => {
     if (challenged) return
     setChallenged(true)
     setMood('thinking')
+    const steps: FallbackLoopStep[] = node.error
+      ? fallbackLoopFor(node.error.quote, node.error.fix)
+      : [{ step: '修复', who: 'AI', text: noErrorChallengeReply }]
     setQueue(q => [
       ...q,
-      ...fallbackLoop.map(f => ({
+      ...steps.map(f => ({
         kind: (f.who === '学生' ? 'student' : f.step === '沉淀' ? 'system' : 'ai') as Bubble['kind'],
         text: f.step === '发现' ? f.text : `【${f.step}】${f.text}`,
       })),

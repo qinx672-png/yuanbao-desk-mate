@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { WatchMark } from '@/types'
 import { classNote, classNoteGuardrail } from '@/data/mockData'
 import { IconShield, IconBook, IconCheck, IconClock, IconPencil, IconClose } from '@/components/common/Icons'
 
@@ -24,7 +25,18 @@ import { IconShield, IconBook, IconCheck, IconClock, IconPencil, IconClose } fro
 
 type Section = 'points' | 'examples' | 'board'
 
-export default function ClassNote() {
+interface Props {
+  /** 手表端同步过来的课堂打点。不传 = 纯手机视图，这一屏也能单独看 */
+  marks?: WatchMark[]
+  /** 是否已下课同步（只影响状态显示，打点一按就过来了） */
+  synced?: boolean
+  /** 要联动高亮的知识点下标 */
+  activeIndex?: number | null
+  /** 点某条打点，让它挂着的知识点再亮一次 */
+  onSelectMark?: (m: WatchMark) => void
+}
+
+export default function ClassNote({ marks = [], synced = false, activeIndex = null, onSelectMark }: Props) {
   /** 课堂记录开关。默认关闭，需老师授权后开启 —— 这里是「已授权」的演示态 */
   const [enabled, setEnabled] = useState(true)
 
@@ -84,6 +96,55 @@ export default function ClassNote() {
             <p className="text-[12px] text-ink-400 mt-1">授课老师：{classNote.teacher}</p>
           </div>
 
+          {/* ── 课堂打点：手表上按的那几下，在这里落到具体知识点上 ──── */}
+          <div className="card p-4">
+            <div className="flex items-center gap-2 mb-2.5">
+              <span
+                className={`chip border ${
+                  synced ? 'bg-cheer-50 text-cheer-700 border-cheer-100' : 'bg-warm-50 text-warm-700 border-warm-100'
+                }`}
+              >
+                {synced ? <IconCheck className="w-3.5 h-3.5" /> : <IconClock className="w-3.5 h-3.5" />}
+                {synced ? '已同步' : '记录中'}
+              </span>
+              <h2 className="text-[14.5px] font-bold text-ink-900">课堂打点</h2>
+              <span className="ml-auto text-[12px] tabular-nums text-ink-400">{marks.length} 次</span>
+            </div>
+
+            {marks.length === 0 ? (
+              <p className="text-[12.5px] leading-relaxed text-ink-400">
+                还没打过点。上课时在手表上按一下「没听懂」，那个时刻会自动记到对应的知识点上。
+              </p>
+            ) : (
+              <>
+                <p className="mb-2.5 text-[12px] leading-relaxed text-ink-400">
+                  手表上按的那一下，自动挂到了老师当时正在讲的知识点上 —— 你不需要说清自己哪里没听懂。
+                </p>
+                <div className="space-y-1.5">
+                  {marks.map(m => (
+                    <button
+                      key={m.id}
+                      onClick={() => onSelectMark?.(m)}
+                      className={`tap w-full items-start gap-2.5 rounded-xl px-3 py-2 text-left transition ${
+                        m.index === activeIndex ? 'bg-warm-50 ring-1 ring-warm-200' : 'bg-ink-50 hover:bg-ink-100'
+                      }`}
+                    >
+                      <span className="mt-0.5 shrink-0 text-[12px] font-semibold tabular-nums text-warm-600">
+                        {m.at}
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[12.5px] font-semibold text-ink-800">没听懂</span>
+                        <span className="mt-0.5 block text-[11.5px] leading-relaxed text-ink-400">
+                          → 已挂到「{classNote.knowledgePoints[m.index]}」
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
           {/* ── 三类结构化要点 ─────────────────────────────── */}
           {sections.map(s => (
             <div key={s.key} className="card p-4">
@@ -92,14 +153,27 @@ export default function ClassNote() {
                 <h2 className="text-[14.5px] font-bold text-ink-900">{s.label}</h2>
               </div>
               <div className="space-y-2">
-                {s.items.map((it, i) => (
-                  <div key={it} className="flex gap-2.5">
-                    <span className="w-4 h-4 rounded-full bg-brand-50 text-brand-600 text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5">
-                      {i + 1}
-                    </span>
-                    <p className="text-[13px] text-ink-700 leading-relaxed">{it}</p>
-                  </div>
-                ))}
+                {s.items.map((it, i) => {
+                  /* 和手表联动：刚打的那个点，对应的知识点亮一下 */
+                  const lit = s.key === 'points' && i === activeIndex
+                  return (
+                    <div
+                      key={it}
+                      className={`-mx-2 flex gap-2.5 rounded-xl px-2 py-1.5 transition-colors duration-500 ${
+                        lit ? 'bg-warm-50' : 'bg-transparent'
+                      }`}
+                    >
+                      <span
+                        className={`w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center shrink-0 mt-0.5 transition-colors duration-500 ${
+                          lit ? 'bg-warm-500 text-white' : 'bg-brand-50 text-brand-600'
+                        }`}
+                      >
+                        {i + 1}
+                      </span>
+                      <p className="text-[13px] text-ink-700 leading-relaxed">{it}</p>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           ))}

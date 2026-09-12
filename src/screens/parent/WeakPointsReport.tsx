@@ -51,8 +51,15 @@ export default function WeakPointsReport({ onOpen }: Props) {
                 style={{ width: `${w.to}%` }}
               />
             </div>
+            {/*
+              这里原来写的是「本周针对性练习 N 次」——但 errorCount 存的是
+              「近 30 天出错次数」（见 GrowthCenter / StudentHome 的同一字段）。
+              一个数字在两个口径之间来回换，是数据里最不该有的东西：
+              家长会照着「本周练了 4 次」去判断孩子这周用没用功。
+              现在按它本来的含义写，也不替家长下「练了就有效」的结论。
+            */}
             <div className="text-[12px] text-ink-400 mt-2.5">
-              本周针对性练习 {w.errorCount} 次，掌握度提升 {w.to - w.from} 个百分点
+              近 30 天在这个知识点上出错 {w.errorCount} 次 · 掌握度 {w.from}% → {w.to}%
             </div>
           </div>
 
