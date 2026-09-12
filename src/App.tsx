@@ -9,7 +9,7 @@ import { classNote } from '@/data/mockData'
 import AppBar from '@/components/common/AppBar'
 import TabBar from '@/components/common/TabBar'
 import RestReminder from '@/components/common/RestReminder'
-import { IconEye, IconClock, IconStudent, IconParent } from '@/components/common/Icons'
+import { IconEye, IconClock, IconStudent, IconParent, IconCamera } from '@/components/common/Icons'
 
 import RoleSelect from '@/screens/RoleSelect'
 import Onboarding from '@/screens/student/Onboarding'
@@ -31,6 +31,16 @@ import PlanSuggestionScreen from '@/screens/parent/PlanSuggestionScreen'
 const TICK_MS = 3000
 const REST_THRESHOLD = 40
 
+/**
+ * 拍照浮层当前开着哪种模式（null = 没开）。
+ *
+ * 两个入口拍的东西根本不是一回事，所以不能合成一个按钮：
+ *  · newProblem —— 对话屏右上角那个常驻入口。学生手上另有一道不会的题。
+ *  · myWork     —— 阶段3 里的「拍照上传」。拍的是**这道题**的解题过程，
+ *                  同学看过程不看答案，拍完直接进入提交。
+ */
+type ShootKind = 'newProblem' | 'myWork'
+
 export default function App() {
   const [screen, setScreen] = useState<ScreenId>('role')
   const [studyMinutes, setStudyMinutes] = useState(36)
@@ -42,6 +52,15 @@ export default function App() {
   const [tutorKey, setTutorKey] = useState(0)
   const [roleId, setRoleId] = useState('a2')
   const [guideDepth, setGuideDepth] = useState<GuideDepth>('标准')
+
+  /*
+   * ── 拍照浮层（对话屏）────────────────────────────────────
+   * 它做成**盖在对话上的浮层**，而不是切到 stu-photo 那一屏。
+   * 原因是切屏会让 TutorFlow 整个卸载，笔记本里刚聊过的内容全清空 ——
+   * 那不叫「存断点」，那叫把学生的进度扔了。
+   * 浮层留在原地，对话原封不动在下面，关掉就回到刚才那一步。
+   */
+  const [shootMode, setShootMode] = useState<ShootKind | null>(null)
 
   /*
    * ── 跨设备演示态（只在「课堂记录」屏用）──────────────────
@@ -71,6 +90,7 @@ export default function App() {
   const go = useCallback((id: ScreenId) => setScreen(id), [])
 
   const restartTutor = useCallback(() => {
+    setShootMode(null)
     setTutorKey(k => k + 1)
     setScreen('stu-diagnosis')
   }, [])
@@ -104,7 +124,21 @@ export default function App() {
       case 'stu-diagnosis':
         return { title: '题目识别与诊断', subtitle: '阶段 1 / 6', tone: 'student' as const, back: () => go('stu-home') }
       case 'stu-tutor':
-        return { title: '元宝同桌', subtitle: '我们一起把它想明白', tone: 'student' as const, back: () => go('stu-home') }
+        /* 浮层盖上来时顶栏跟着变深色 —— 让「现在正在拍题」一眼可见 */
+        return shootMode
+          ? {
+              title: shootMode === 'newProblem' ? '拍新题' : '拍解题过程',
+              subtitle: shootMode === 'newProblem' ? '这一步已存成断点，关掉就回到刚才' : '我看的是过程，不是答案',
+              tone: 'dark' as const,
+              back: () => setShootMode(null),
+            }
+          : {
+              title: '元宝同桌',
+              subtitle: '我们一起把它想明白',
+              tone: 'student' as const,
+              back: () => go('stu-home'),
+              right: <CameraEntry onClick={() => setShootMode('newProblem')} />,
+            }
       case 'stu-summary':
         return { title: '本次学习小结', subtitle: '阶段 6 / 6', tone: 'student' as const, back: () => go('stu-home') }
       case 'stu-growth':
@@ -126,7 +160,7 @@ export default function App() {
       default:
         return null
     }
-  }, [screen, go])
+  }, [screen, go, shootMode])
 
   const renderScreen = () => {
     switch (screen) {
@@ -154,6 +188,9 @@ export default function App() {
             roleId={roleId}
             depth={guideDepth}
             onDepthChange={setGuideDepth}
+            shoot={shootMode}
+            onShoot={setShootMode}
+            onShootNew={restartTutor}
             onFinish={r => {
               setMastered(r.mastered)
               go('stu-summary')
@@ -263,6 +300,32 @@ export default function App() {
 
       <DesignNotes current={screen} />
     </div>
+  )
+}
+
+/**
+ * 对话屏右上角的常驻拍照入口。
+ *
+ * ── 为什么它必须常驻（这一版修的就是这件事）────────────────
+ * 这个产品原本的设计原则是「动作长在生成物里，不是常驻按钮」——
+ * AI 邀请你做的动作，就长在那条回答里。
+ * 这对 **AI 发起** 的动作是对的。
+ * 但拍照答疑是 **学生自己发起** 的：他今天就是拿到了一道不会的题，
+ * 不该先等 AI 开口，才有地方把它拍进来。
+ *
+ * 一句话：AI 邀请的动作可以长在生成物里；学生随时可能发起的动作，
+ * 必须有常驻入口。
+ */
+function CameraEntry({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label="拍新题"
+      className="tap gap-1.5 rounded-xl bg-brand-50 px-3 text-[12.5px] font-bold text-brand-700 active:scale-95 transition"
+    >
+      <IconCamera className="w-4 h-4" />
+      拍新题
+    </button>
   )
 }
 

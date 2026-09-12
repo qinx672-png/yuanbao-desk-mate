@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import type { AssistantQuickAsk } from '@/types'
 import { assistantThread, assistantQuickAsks, student } from '@/data/mockData'
 import { IconShield, IconSpark, IconArrowRight } from '@/components/common/Icons'
 
@@ -26,14 +27,33 @@ import { IconShield, IconSpark, IconArrowRight } from '@/components/common/Icons
 
 type Msg = { from: 'ai' | 'parent'; text: string; source?: string }
 
-/** 原型：关键词匹配。真跑由 LLM 基于学情数据回答。 */
+/**
+ * 原型：主题词命中。真跑由 LLM 基于学情数据回答。
+ *
+ * ── 这一版修的是什么 ────────────────────────────────────────
+ * 旧版拿问题的每个字去 label 里找，命中 30% 算匹配。实测《产品定位说明》
+ * 148-162 行承诺的 5 个例子：6 问 5 不中，唯一「中」的那个还答非所问 ——
+ * 问「今天学了什么」，它答「今天该练什么」。连屏上输入框自己写的
+ * placeholder 都答不上来。
+ *
+ * 现在改成主题词命中：家长的话里出现哪个主题词，就归到哪一类，
+ * 命中最多的那条胜出。它仍然不是理解 —— 但「问什么答什么」成立了。
+ *
+ * 一个都没命中时，如实说答不上来，不编一个像模像样的回答糊过去。
+ * 这个产品对家长的第一句承诺就是「我基于学情数据回答，也会说不」，
+ * 那就得真的会说不。
+ */
 function answerFor(q: string): { text: string; source: string } | null {
-  const hit = assistantQuickAsks.find(a => {
-    let overlap = 0
-    for (const ch of a.label) if (q.includes(ch)) overlap++
-    return overlap >= Math.max(2, a.label.length * 0.3)
-  })
-  return hit ? { text: hit.answer, source: hit.source } : null
+  let best: AssistantQuickAsk | null = null
+  let bestScore = 0
+  for (const a of assistantQuickAsks) {
+    const score = a.keys.filter(k => q.includes(k)).length
+    if (score > bestScore) {
+      best = a
+      bestScore = score
+    }
+  }
+  return best ? { text: best.answer, source: best.source } : null
 }
 
 export default function ParentAssistant() {
@@ -64,7 +84,7 @@ export default function ParentAssistant() {
           ? { from: 'ai', text: a.text, source: a.source }
           : {
               from: 'ai',
-              text: '这个问题原型里我答不上来 —— 我只准备了下面那几个问题。真实产品里我会基于学情数据回答，答不了的会直接说答不了。',
+              text: '这个问题原型里我答不上来 —— 我只准备了学情、教育方法、边界这三类。真实产品里我会基于学情数据回答，答不了的会直接说答不了。',
               source: '诚实说明：原型未接入真实模型',
             },
       ])
@@ -106,9 +126,10 @@ export default function ParentAssistant() {
 
       {/* ── 常问的几个（家长不知道能问什么，这里给脚手架）──────── */}
       <div className="shrink-0 bg-white border-t border-ink-100 px-4 pt-3 pb-3">
-        <div className="text-[11px] text-ink-400 mb-1.5">常问的</div>
+        <div className="text-[11px] text-ink-400 mb-1.5">常问的 · 也可以直接打字问</div>
         <div className="flex gap-1.5 overflow-x-auto scroll-area pb-2 -mx-1 px-1">
-          {assistantQuickAsks.map(a => (
+          {/* 只挂标了 chip 的那几条：全铺上去要横滑三屏，反而谁都看不见 */}
+          {assistantQuickAsks.filter(a => a.chip).map(a => (
             <button
               key={a.label}
               onClick={() => ask(a.label)}

@@ -14,6 +14,7 @@ import {
   interestContexts,
 } from '@/data/mockData'
 import ClassmateAvatar, { moodFromBubbleKind, findRole, type ClassmateMood } from '@/components/common/ClassmateAvatar'
+import PhotoUpload from '@/screens/student/PhotoUpload'
 import { IconBook, IconClock, IconMic, IconCamera, IconPencil, IconCheck, IconSpark, IconShield } from '@/components/common/Icons'
 
 /**
@@ -39,13 +40,29 @@ interface Props {
   depth: GuideDepth
   onDepthChange: (d: GuideDepth) => void
   onFinish: (r: { mastered: boolean; exited?: boolean }) => void
+  /** 拍照浮层当前开着哪种模式（null = 没开）。浮层状态在上层，因为顶栏也要跟着变 */
+  shoot: ShootKind | null
+  onShoot: (k: ShootKind | null) => void
+  /** 拍了新题：交给上层走诊断流程；这道题的进度已存成断点 */
+  onShootNew: () => void
 }
+
+type ShootKind = 'newProblem' | 'myWork'
 
 type Mode = 'chat' | 'timer' | 'answer'
 
+/** 学生用哪种方式把答案交给同学 —— 提交界面的措辞要跟着变，不能三种都说「写在」 */
+type AnswerVia = 'type' | 'voice' | 'photo'
+
+const VIA_HEAD: Record<AnswerVia, string> = {
+  type: '把答案写在笔记本里给同学看：',
+  voice: '说给同学听 —— 选你刚说的那个：',
+  photo: '看到你的草稿了。这道题你选的是：',
+}
+
 const TYPE_DELAY = 520
 
-export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Props) {
+export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoot, onShoot, onShootNew }: Props) {
   const role = findRole(roleId)
   const [history, setHistory] = useState<Bubble[]>([])
   const [queue, setQueue] = useState<Bubble[]>([])
@@ -60,6 +77,7 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
   const [showDepth, setShowDepth] = useState(false)
   const [showExit, setShowExit] = useState(false)
   const [challenged, setChallenged] = useState(false)
+  const [answerVia, setAnswerVia] = useState<AnswerVia>('type')
   const scrollRef = useRef<HTMLDivElement>(null)
 
   /** 档位改写：同一份内容换讲法（快讲 → 跳过苏格拉底链，直接结论＋验证题） */
@@ -185,6 +203,33 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
     setHistory(h => [...h, { kind: 'student', text: o.label }, { kind: 'ai', text: o.reply }])
     setTimeout(() => onFinish({ mastered: false, exited: true }), 700)
   }
+
+  /**
+   * 快门按下之后分两条路 —— 因为拍的东西根本不是一回事。
+   *
+   *  · 拍新题：交给上层走诊断流程。这道题的进度已经存成断点，
+   *    关掉浮层就回到刚才那一步，笔记本里的内容一个字都不会少。
+   *  · 拍解题过程：留在这一屏。同学看的是过程不是答案，
+   *    所以拍完直接进入提交，不打断这道题。
+   */
+  const shootDone = () => {
+    const kind = shoot
+    onShoot(null)
+    if (kind === 'newProblem') {
+      onShootNew()
+      return
+    }
+    writeStudent('（拍了草稿纸）')
+    setAnswerVia('photo')
+    setMode('answer')
+  }
+
+  /** 阶段3 三种提交方式：各走各的路，不再三个按钮干同一件事 */
+  const answerWays = [
+    { Icon: IconPencil, label: '打字写答案', act: () => { setAnswerVia('type'); setMode('answer') } },
+    { Icon: IconMic, label: '语音说', act: () => { setAnswerVia('voice'); setMode('answer') } },
+    { Icon: IconCamera, label: '拍照上传', act: () => onShoot('myWork') },
+  ]
 
   const waiting = queue.length > 0
   const currentStage: Stage = mode === 'timer' || mode === 'answer' ? 3 : node.stage
@@ -345,14 +390,10 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
               </button>
             </div>
             <div className="grid grid-cols-3 gap-2.5 mb-3">
-              {[
-                { Icon: IconPencil, label: '打字写答案' },
-                { Icon: IconMic, label: '语音说' },
-                { Icon: IconCamera, label: '拍照上传' },
-              ].map(({ Icon, label }) => (
+              {answerWays.map(({ Icon, label, act }) => (
                 <button
                   key={label}
-                  onClick={() => setMode('answer')}
+                  onClick={act}
                   className="tap flex-col gap-1 rounded-2xl border-2 border-ink-100 py-3 text-ink-700 active:scale-[.98] transition"
                 >
                   <Icon className="w-5 h-5 text-brand-600" />
@@ -360,7 +401,13 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
                 </button>
               ))}
             </div>
-            <button className="btn-primary py-3" onClick={() => setMode('answer')}>
+            <button
+              className="btn-primary py-3"
+              onClick={() => {
+                setAnswerVia('type')
+                setMode('answer')
+              }}
+            >
               我算好了
             </button>
           </div>
@@ -369,7 +416,7 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
         {/* 阶段3→4：提交答案 */}
         {mode === 'answer' && (
           <div className="animate-fadeUp">
-            <div className="text-[12.5px] text-ink-400 mb-2.5">把答案写在笔记本里给同学看：</div>
+            <div className="text-[12.5px] text-ink-400 mb-2.5">{VIA_HEAD[answerVia]}</div>
             <div className="space-y-2.5">
               {answerChoices.map(a => (
                 <button
@@ -496,6 +543,16 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish }: Pr
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/*
+        拍照浮层。盖在对话上，不切屏 —— 底下的笔记本原封不动，
+        所以「关掉就回到刚才那一步」是真的，不是靠恢复逻辑装出来的。
+      */}
+      {shoot && (
+        <div className="absolute inset-0 z-30 flex flex-col bg-[#121a26] animate-fadeUp">
+          <PhotoUpload onShoot={shootDone} />
         </div>
       )}
     </div>
