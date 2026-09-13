@@ -10,10 +10,11 @@ import type {
   PlanSuggestion,
   StageMeta,
   OnboardStep,
+  QuickQuestion,
   StartProbe,
   ProfileV0,
-  GuideDepth,
-  GuideDepthMeta,
+  TeachingMode,
+  FollowUp,
   FallbackLoopStep,
   ExitOption,
   StateSignal,
@@ -22,6 +23,7 @@ import type {
   AssistantMessage,
   AssistantQuickAsk,
 } from '@/types'
+import { findPoint, citeOf, refOf } from './knowledgeBase'
 
 /* ------------------------------------------------------------------
  * 学生画像
@@ -55,115 +57,269 @@ export { avatarRoles } from './avatarRoles'
  * 学生感受到的是「认识一个新同学」，系统实际在采集画像；
  * 全程不出现问卷、量表、进度条，也不向学生输出人格结论。
  * ================================================================== */
+
 /*
- * ── o1~o4 的四步，是「同桌先猜，你来纠正」，不是「同桌问你，你来回答」 ──
+ * ── 2026-09-12 改版：从「同桌猜你是什么人」改成「快问快答」 ──────────
  *
- * ask 写的是**同桌的猜测**（嘴上说的那句）；小本子上记的是它的简写版。
- * 猜第几个选项、为什么这么猜，都在 Onboarding.tsx 的 GUESSES 表里 ——
- * 从第二步起，猜测的依据是学生上一句说过的话（「因为你刚才说…」），
- * 所以 choices 的顺序要和 GUESSES 里的 pick 下标对上，改动时两边一起改。
+ * 旧版是四轮「同桌猜 → 你纠正 → 我归纳一句」。问题出在三处：
  *
- * options 里的 label 都是**纠正的话**（「猜错了，我打球」），
- * echo 才是学生真正的意思，本子上写的是 echo —— 纠正和回答分开，读起来才不像问卷。
+ * 1. 四轮同一个形状，学生做的动作都是「从三个选项里点一个」，第四遍一定腻；
+ * 2. 每次猜完同桌还要归纳一句「你习惯先搭框架」——**这已经在给孩子定性了**，
+ *    正是《产品定位说明》「刻意不做的事」要躲的那类话。外壳是游戏，里子还是量表；
+ * 3. 学生说完兴趣，下一句就被考题了。这一下教给他的是
+ *    「我说什么，你都会拿来考我」，之后他就不敢说真话了 ——
+ *    而冷启动的全部价值，就在于让他敢说。
+ *
+ * 新版：兴趣那一步保留（「我手上一条线索都没有，硬猜一个」是好设计，
+ * 而且它采的兴趣要喂给出题情境），后面接 10 道快问快答 —— 点完即走，不打断。
+ * 「猜」也留着，但只留 3 题，而且猜的是「这题你会选哪个」，不是「你是什么人」。
  */
-export const onboardSteps: OnboardStep[] = [
+
+/** 第一步：同桌硬猜你周末干嘛。学生纠正它，这一句里采到兴趣（兴趣 → 出题情境素材库） */
+export const onboardInterest: OnboardStep = {
+  id: 'o1',
+  kind: 'chat',
+  ask: '你周末八成是在家躺着刷手机。猜得准吗？',
+  measures: '兴趣爱好 → 之后出题就用它当情境（不是从菜单里挑一个标签）',
+  options: [
+    { label: '猜错了，我打球', echo: '我周末打篮球', tag: '篮球' },
+    { label: '猜错了，我打游戏', echo: '我周末打游戏', tag: '游戏' },
+    { label: '猜错了，我看动漫', echo: '我看动漫 / 画画', tag: '动漫' },
+    { label: '还真差不多', echo: '在家躺着', tag: '休息' },
+  ],
+}
+
+/** 最后一步：选形象（8 个官方形象，换外壳不换内核） */
+export const onboardAvatar: OnboardStep = {
+  id: 'o6',
+  kind: 'avatar',
+  ask: '差不多认识了。最后一件事：我长什么样，你来挑。',
+  measures: '角色库自选（8 个官方形象，换外壳不换内核）',
+}
+
+/**
+ * 10 道快问快答 = 大五五个维度 × 每维 2 题。
+ *
+ * ── 为什么是 2 题，不是 1 题也不是 5 题 ──────────────────────
+ * 1 题就是一次抛硬币，读不出东西；2 题能给出「偏低 / 中等 / 偏高」三个粗档，
+ * 够用了 —— 别装精确。而孩子做到第 8 题就开始烦，烦了答案就不真。
+ * 10 题、一屏一道、点完即走，约 40 秒。
+ *
+ * ── 每题两个选项必须一样体面 ────────────────────────────────
+ * 只要有一个明显更「好」，学生答的就是「应该选什么」，不是「我会怎么做」。
+ * 所以每一对都写成两种都说得过去、都像正常人会选的样子，谁也不比谁高级。
+ *
+ * ── pledge 是承诺，不是评价 ─────────────────────────────────
+ * 「以后卡住我先不开口，等你说」是承诺；「你比较内向」是贴标签。
+ * 本子上最后落的几行就是这个 —— 孩子看了会觉得**被接住**，而不是被看穿。
+ *
+ * ── guess 只挂在 3 题上（q1 / q4 / q8）──────────────────────
+ * 每题都猜会打断节奏；更要紧的是，猜了之后学生会不自觉往猜的那边靠，
+ * 采到的东西就不准了。q4、q8 用 'echo'：同维度相邻两题，跟上一题同向猜 ——
+ * 这是同桌真的在「往下推」，不是查户口。
+ */
+export const quickQuestions: QuickQuestion[] = [
+  /* ── 外向性：决定反馈密度与开口方式 ── */
   {
-    id: 'o1',
-    kind: 'chat',
-    ask: '你周末八成是在家躺着刷手机。猜得准吗？',
-    measures: '兴趣爱好 → 当场织进一道物理题（不是从菜单里挑一个标签）',
-    options: [
-      { label: '猜错了，我打球', echo: '我周末打篮球', tag: '篮球' },
-      { label: '猜错了，我打游戏', echo: '我周末打游戏', tag: '游戏' },
-      { label: '猜错了，我看动漫', echo: '我看动漫 / 画画', tag: '动漫' },
-      { label: '还真差不多', echo: '在家躺着', tag: '休息' },
+    id: 'q1',
+    dimension: '外向性',
+    scene: '周末突然多出两个小时，你更想——',
+    choices: ['约人出去打球', '自己待着，谁都别叫我'],
+    high: 0,
+    pledge: [
+      '你有劲的时候是往外使的。那以后卡住我直接问你 —— 问比你自己憋着快。',
+      '你更愿意自己待着消化。那卡住的时候我先不开口，等你说。',
+    ],
+    guess: { pick: 1, blind: true },
+  },
+  {
+    id: 'q2',
+    dimension: '外向性',
+    scene: '老师说要找个人上台讲这道题——',
+    choices: ['我来吧，正好我有想法', '我把内容准备好，讲让别人上'],
+    high: 0,
+    pledge: [
+      '想说的题我留给你讲一遍 —— 讲出来比听懂结实。',
+      '你写下来的东西比说出来的清楚。那以后我多看你的过程，不逼你开口。',
+    ],
+  },
+
+  /* ── 尽责性：决定任务切分粒度 ── */
+  {
+    id: 'q3',
+    dimension: '尽责性',
+    scene: '周五发下来的作业，你一般——',
+    choices: ['周五晚上就干掉', '周日晚上再写，deadline 是第一生产力'],
+    high: 0,
+    pledge: [
+      '你是先清完再玩的那种。那我一次给你一整块，别拆碎了喂。',
+      '那我把任务切小 —— 一次只给你一件事，做完就收工。',
     ],
   },
   {
-    id: 'o2',
-    kind: 'chat',
-    ask: '小组作业里，你八成是那种「把自己那份做完就行」的人。猜得准吗？',
-    measures: '大五 · 外向性 / 尽责性 → 只用于适配反馈方式与节奏',
-    options: [
-      { label: '猜错了，我来安排', echo: '小组作业我来安排' },
-      { label: '差不多，我做自己那份', echo: '我做自己那份就行' },
-      { label: '都不是，我缺哪补哪', echo: '看情况，缺哪补哪' },
+    id: 'q4',
+    dimension: '尽责性',
+    scene: '考试前一晚，你的书包——',
+    choices: ['早就收好了，笔都试过', '明早现找，反正找得到'],
+    high: 0,
+    pledge: [
+      '考前我给你列个单子，你照单收一遍。',
+      '那考前我提前一天问你一句：东西齐了没。',
+    ],
+    guess: { pick: 'echo' },
+  },
+
+  /* ── 开放性：决定给几种讲法 ── */
+  {
+    id: 'q5',
+    dimension: '开放性',
+    scene: '一道题你做出来了，但隐约觉得还有别的走法——',
+    choices: ['试试看，万一更省事', '算了，做对就行'],
+    high: 0,
+    pledge: [
+      '那以后每道题我给你留一句：还有别的走法。',
+      '那你做对我就收手，不多塞 —— 想换走法的时候你叫我。',
     ],
   },
   {
-    id: 'o3',
-    kind: 'chat',
-    ask: '一道题卡住十分钟，你会先跳过、回头再看。猜得准吗？',
-    measures: '大五 · 情绪稳定性 + 学习动机 → 决定「递台阶」的时机',
-    options: [
-      { label: '猜错了，我死磕到底', echo: '死磕到底' },
-      { label: '差不多，我先跳过', echo: '先跳过，回头再看' },
-      { label: '猜错了，我直接搜', echo: '直接搜答案' },
+    id: 'q6',
+    dimension: '开放性',
+    scene: '换了个新老师，讲法跟以前完全不一样——',
+    choices: ['挺新鲜，听听看他怎么讲', '还是原来那个老师讲得顺'],
+    high: 0,
+    pledge: [
+      '同一个知识点我换两种讲法给你，你挑顺手的那个。',
+      '那我一种讲法讲到底，不中途换 —— 换了你反而乱。',
+    ],
+  },
+
+  /* ── 宜人性：决定先给全貌还是先给手上这块 ── */
+  {
+    id: 'q7',
+    dimension: '宜人性',
+    scene: '小组作业分完组，你更常干的是——',
+    choices: ['把大家的分工串一串，别撞车', '分给我那块做完就行'],
+    high: 0,
+    pledge: [
+      '你适合先看全貌。那我先告诉你这一步在哪，再往下走。',
+      '那我一次只说你手上这块，别人那部分不占你注意力。',
     ],
   },
   {
-    id: 'o4',
-    kind: 'chat',
-    ask: '你学数理，多半是为了考试。猜得准吗？',
-    measures: '学习动机类型（内在兴趣 / 外部压力）',
-    options: [
-      { label: '猜错了，我想弄懂原理', echo: '想弄懂原理，挺有意思' },
-      { label: '差不多，考试要考', echo: '考试要考，没办法' },
-      { label: '都不是，怕家里念', echo: '不想被家里念' },
+    id: 'q8',
+    dimension: '宜人性',
+    scene: '同桌这次考得比你高 5 分——',
+    choices: ['问问他怎么做的', '下次我得超过他'],
+    high: 0,
+    pledge: [
+      '那你想知道别人怎么做的，我就把两种解法摆一起 —— 不比分数，比路子。',
+      '那我把目标写清楚：你上次多少、这次到哪儿 —— 跟你自己比。',
+    ],
+    guess: { pick: 'echo' },
+  },
+
+  /* ── 情绪稳定性：决定递台阶的时机 ── */
+  {
+    id: 'q9',
+    dimension: '情绪稳定性',
+    scene: '一道题卡了十分钟还没出来——',
+    choices: ['先放一放，换换脑子再回来', '越卡越想弄出来，不甘心'],
+    high: 0,
+    pledge: [
+      '那卡住我就提一句「先放着」，不用你开口。',
+      '那我不劝你停 —— 但到十分钟我会递个小台阶，只递半步。',
     ],
   },
   {
-    id: 'o5',
-    kind: 'probe',
-    ask: '猜完了。最后两道小题 —— 我不看你答得对不对，只想知道从哪儿开始陪你学。',
-    measures: '学科起点诊断：看答题，不问「你数学好不好」',
-  },
-  {
-    id: 'o6',
-    kind: 'avatar',
-    ask: '差不多认识了。最后一件事：我长什么样，你来挑。',
-    measures: '角色库自选（8 个官方形象，换外壳不换内核）',
+    id: 'q10',
+    dimension: '情绪稳定性',
+    scene: '卷子发下来，分不理想——',
+    choices: ['先看看错哪了', '先塞书包里，过两天再说'],
+    high: 0,
+    pledge: [
+      '那考完我们直接过错的，不绕弯。',
+      '那错的题我先替你收着，你想看的时候再拿出来 —— 不催。',
+    ],
   },
 ]
 
-/** 学科起点诊断题（架构说明 五：起点看答题，不看自评） */
-export const startProbes: StartProbe[] = [
+/**
+ * 大五每一维「算出来之后用来干什么」。
+ *
+ * 注意写法：写的是**怎么陪他学**，不是**他是什么人**。
+ * 「按步骤推进，每步留确认点」是产品行为；「他是个有条理的人」是人格定论 ——
+ * 后者正是《产品定位说明》禁止输出的东西。
+ */
+export const traitUsage: Record<string, string> = {
+  外向性: '决定反馈密度 —— 是主动开口问，还是等他先说',
+  尽责性: '决定任务切分粒度 —— 给一整块，还是切小',
+  开放性: '决定给几种讲法 —— 多留一条走法，还是一种讲到底',
+  宜人性: '决定先给什么 —— 先给全貌，还是先给手上这块',
+  情绪稳定性: '决定递台阶的时机 —— 提前递，还是等他说',
+}
+
+/**
+ * 学科起点诊断题（架构说明 五：起点看答题，不看自评）。
+ *
+ * ⚠️ 2026-09-12 起**冷启动不再出这两道题**。第一次见面就考他，是对关系的透支；
+ * 而且学生会学到「我说什么，你都会拿来考我」，之后就不敢说真话了 ——
+ * 而冷启动的全部价值就在于让他敢说。
+ *
+ * 这两道题留给**第一次真实辅导**：那时候他本来就是带着题来的，顺手看起点，
+ * 完全不突兀（辅导页的阶段 1 本来就在做诊断）。
+ * 原型尚未在辅导页接线，所以这里暂时没有调用点 —— **别当死代码删了**。
+ */
+const probeSeeds: Omit<StartProbe, 'subject' | 'knowledgePoint'>[] = [
   {
     id: 's1',
-    subject: '物理',
+    /* 这题问的是「取下一只另一只还亮不亮」——考的是串联电路**只有一条路径**，
+       属于「串联和并联」这一节，不是「电流的规律」那一节。出自错了，
+       后面拿什么题来补基础就会跟着错。 */
+    pointId: 'p15-3',
     question: '两只小灯泡串在一根线上，取下其中一只，另一只会怎样？',
     choices: ['照样亮', '不亮了', '更亮一点'],
     answerIndex: 1,
-    knowledgePoint: '串联电路的电流特点',
   },
   {
     id: 's2',
-    subject: '数学',
+    pointId: 'm21-2-2',
     question: '方程 x² − 4x + 3 = 0 有几个不相等的实数根？',
     choices: ['0 个', '1 个', '2 个'],
     answerIndex: 2,
-    knowledgePoint: '一元二次方程根的判别式',
   },
 ]
 
-/** 画像 V0（Day 1 冷启动后产出；每学一次更新，30 天成型） */
+export const startProbes: StartProbe[] = probeSeeds.map(s => {
+  const p = findPoint(s.pointId)!
+  return { ...s, subject: p.subject, knowledgePoint: p.name }
+})
+
+/**
+ * 画像 V0 里**不由那 10 道题算出**的部分。
+ *
+ * 大五五维和兴趣都是从答案当场算出来的（见 Onboarding.tsx 的 tallyAnswers），
+ * 不写死在这儿 —— 写死会让「科学内核」变成摆设：答案怎么改，画像页纹丝不动。
+ * 这里只放一样：**第一天没采到的东西**。
+ */
 export const profileV0: ProfileV0 = {
-  traits: [
-    { name: '尽责性', level: '中等偏上', usedFor: '按步骤推进，每步留确认点' },
-    { name: '情绪稳定性', level: '中等', usedFor: '连续两次卡住即递台阶，不硬推' },
-    { name: '开放性', level: '较高', usedFor: '多用生活类比切入新概念' },
-  ],
-  motivation: '偏外部驱动（考试导向），需要更密集的正向反馈来撑住过程',
-  interests: ['篮球', '游戏'],
-  startPoint: [
-    { subject: '物理', level: '电路基础薄弱', basis: '起点题答错「串联取下一只灯」' },
-    { subject: '数学', level: '判别式概念已建立', basis: '起点题答对，用时 11 秒' },
+  pending: [
+    {
+      name: '学科起点',
+      why: '第一次见面就考他，是对关系的透支。这两道题留给第一次真实辅导 —— 他本来就是带着题来的',
+      when: '第一次辅导（阶段 1 诊断顺带看）',
+    },
+    {
+      name: '学习动机',
+      why: '问一嘴答的都是场面话（「为了考试呗」），真正准的是看他怎么用。等有行为数据了再判，不猜',
+      when: '用过几次之后，从行为信号里读',
+    },
   ],
 }
 
 /** 画像成型节奏（定位说明 3.0-2） */
 export const profileTimeline = [
-  { when: 'Day 1', what: '闲聊 + 两道起点题 → 画像 V0（够用就行，不追求准）' },
+  { when: 'Day 1', what: '闲聊 + 10 道快问快答 → 画像 V0：兴趣 + 大五粗档（够用就行，不追求准）' },
+  { when: '第一次辅导', what: '补学科起点（阶段 1 诊断顺带看，不在冷启动考他）' },
   { when: '每学一次', what: '用行为信号校正：作答速度、连续错误、停留时长' },
   { when: '约 30 天', what: '画像成型，进入个性化引导与情境出题' },
 ]
@@ -171,11 +327,13 @@ export const profileTimeline = [
 /**
  * 情境个性化素材库：把题目放进学生的兴趣场景（定位说明 3.0-2）
  *
- * 这一句在三个地方用同一份，别各写各的：
- * 1. 冷启动：学生说出兴趣后，当场出的那道物理题就用它当情境（Onboarding.tsx 的 SPOT_QUESTIONS）
- * 2. 辅导页：阶段 5 的变式题（script 里 p5-quiz 的 interestContext = '篮球'）
- * 3. 画像页：兴趣爱好 → 出题情境素材库
+ * 这一句在两个地方用同一份，别各写各的：
+ * 1. 辅导页：阶段 5 的变式题（script 里 p5-quiz 的 interestContext = '篮球'）
+ * 2. 画像页：兴趣爱好 → 出题情境素材库
  * 所以值保持成一句「情境话」，不要在末尾加题目 —— 题目在引用它的地方拼。
+ *
+ * ⚠️ 2026-09-12 起冷启动不再出题，所以这里少了一处旧引用
+ *（原先「说出兴趣后当场出的那道物理题」已删，见 types/index.ts 的 StartProbe 说明）。
  */
 export const interestContexts: Record<string, string> = {
   篮球: '学校篮球场记分牌的灯带是串联接的',
@@ -185,28 +343,96 @@ export const interestContexts: Record<string, string> = {
 }
 
 /* ==================================================================
- * V2 · 引导深度三档（定位说明 3.1）
+ * V2 · 引导深度三档 = 三个「教法插件」（定位说明 3.1）
+ *
  * 「启发式」是默认值，不是唯一值。学生可随时切档，AI 也会在场景里主动建议。
+ *
+ * ── 2026-09-12 改版：从「改写表」升级成「自包含的档位声明」──────
+ *
+ * 旧版这里有两张分开的东西：guideDepths（展示用）和 depthRewrite（干活用）。
+ * 分开的后果是「深聊」的改写表是空的 —— 它其实不算一档，只是
+ * 「别的档没覆盖到，所以还是原样」。那不是三档，那是一档加两个补丁。
+ *
+ * 现在每档一份自包含声明，`rewrite` 只是它的一个字段。
+ * 三档现在能用**两个轴**完整区分开（这块值得记一下）：
+ *
+ *              追问密度
+ *              ├─ 全程追问 …… 深聊（不给结论）
+ *              ├─ 关键处追问 … 标准（不给结论）
+ *              └─ 不追问 …… 快讲（给结论）
+ *
+ * givesAnswer 把快讲摘出去，probeDensity 把深聊和标准分开。
+ * 两个轴、三个格子，没有一格是空的 —— 这才叫三档。
  * ================================================================== */
-export const guideDepths: GuideDepthMeta[] = [
-  { key: '深聊', label: '深聊', desc: '苏格拉底式全程追问，一步都不替你走', scene: '时间充裕、想真正弄懂原理' },
-  { key: '标准', label: '标准', desc: '关键处提问，其余直接讲清', scene: '默认档，日常作业' },
-  { key: '快讲', label: '快讲', desc: '直接给结论和步骤，配一道题验证', scene: '考前突击、深夜赶时间' },
+export const teachingModes: TeachingMode[] = [
+  {
+    key: '深聊',
+    label: '深聊',
+    desc: '苏格拉底式全程追问，一步都不替你走',
+    scene: '时间充裕、想真正弄懂原理',
+    notFor: { when: '明天就要小测、现在快十一点了', useInstead: '快讲' },
+    strategy: {
+      oneLine: '全程苏格拉底：每一步都先问，学生答不上来就把问题问小，绝不代答',
+      givesAnswer: false,
+      probeDensity: '全程追问',
+    },
+    /**
+     * 空对象，但这次是**显式声明**「深聊就是脚本原样」，不是没覆盖到。
+     *
+     * 脚本本来就是照最深的那一档写的（p2-probe → p2-teach-1 → p2-step1…），
+     * 另外两档是往下降。所以深聊不需要改写任何节点 —— 这件事要写出来，
+     * 否则看代码的人分不清「这一档不改写」和「这一档忘了写」。
+     */
+    rewrite: {},
+  },
+  {
+    key: '标准',
+    label: '标准',
+    desc: '关键处提问，其余直接讲清',
+    scene: '默认档，日常作业',
+    notFor: { when: '这个知识点你已经错第 4 次了，不挖根下次还错', useInstead: '深聊' },
+    strategy: {
+      oneLine: '只在认知基础探测和关键判断处提问，其余直接讲清；讲概念但不代做题',
+      givesAnswer: false,
+      probeDensity: '关键处追问',
+    },
+    /**
+     * 注意指向的是 p2-teach-direct，不是 p2-teach-2：
+     * 后者的开场是一句表扬，而走这条路的学生的上一句是「不记得了」。
+     * 换讲法可以，但不能把表扬也一起搬过去。
+     */
+    rewrite: { 'p2-teach-1': 'p2-teach-direct' },
+  },
+  {
+    key: '快讲',
+    label: '快讲',
+    desc: '直接给结论和步骤，配一道题验证',
+    scene: '考前突击、深夜赶时间',
+    notFor: { when: '概念第一次学、又不赶时间 —— 直接给结论会记住但不会用', useInstead: '深聊' },
+    strategy: {
+      oneLine: '跳过整条苏格拉底链，直接给结论和步骤，配一道题验证是否真会了',
+      givesAnswer: true,
+      probeDensity: '不追问',
+    },
+    rewrite: {
+      'p2-probe': 'p2-fast',
+      'p2-teach-1': 'p2-fast',
+      'p2-teach-2': 'p2-fast',
+      'p2-known': 'p2-fast',
+    },
+  },
 ]
 
-/**
- * 档位对脚本的改写：同一份内容，换讲法。
- * 快讲 → 跳过苏格拉底链，直接结论 + 一题验证；标准 → 跳过生活类比追问，直接讲定义。
+/*
+ * 这里原本有一个 matchModeBySpeech()：从学生的语音里认出「他想换讲法」，
+ * 支持说一句「讲细一点」就切档。2026-09-12 砍掉了。
  *
- * 注意「标准」指向的是 p2-teach-direct，不是 p2-teach-2：
- * 后者的开场是一句表扬，而走这条路的学生的上一句是「不记得了」。
- * 换讲法可以，但不能把表扬也一起搬过去。
+ * 砍的理由不是做不到，是没必要 —— 换讲法面板本来就一按就开、点一下就切，
+ * 让学生对着麦克风再说一遍，比直接点还多两步。而且辅导页的麦克风主要
+ * 用途是答题，多一条「拿语音猜意图」的通路，就多一个「作答被吞掉」的失败点。
+ *
+ * 秦肖的验收原话：「现在点开三档可选就很直接很方便，没有必要加上再说一遍的选项。」
  */
-export const depthRewrite: Record<GuideDepth, Record<string, string>> = {
-  深聊: {},
-  标准: { 'p2-teach-1': 'p2-teach-direct' },
-  快讲: { 'p2-probe': 'p2-fast', 'p2-teach-1': 'p2-fast', 'p2-teach-2': 'p2-fast', 'p2-known': 'p2-fast' },
-}
 
 /** AI 主动建议切档的场景提示（不强制，学生可忽略） */
 export const depthHint = {
@@ -286,12 +512,37 @@ export const noErrorChallengeReply =
 /* ------------------------------------------------------------------
  * 阶段1：题目识别与诊断输出
  * ------------------------------------------------------------------ */
+/**
+ * 这道题挂在「串、并联电路中电压的规律」（p16-2）上，不是在「电流和电路」上 ——
+ * 故障分析靠的是**电压规律**（电压表测谁、谁有示数说明断路在别处），
+ * 电流和电路那一节讲的是电路的组成和电流方向，还做不了故障判断。
+ * 出处从知识点库算，见下方 textbookChapter。
+ */
+const demoPoint = findPoint('p16-2')!
+
+/**
+ * 对话与复习卡片里出现的教材引用，一律由知识点库派生，不手写。
+ *
+ * 原来这几处是手写的「人教版物理九年级上册 第15章第2节」，两处都错：
+ *   ① 人教版物理九年级是「全一册」，没有上册下册之分；
+ *   ② 15.2 是《电流和电路》，而对话里讲的「串联电路中电流处处相等」
+ *      在人教版是 15.5《串、并联电路中电流的规律》——章次对不上。
+ *
+ * 为什么要较真到这个程度：题目背景明说「学生与家长一旦发现讲解与教材
+ * 不一致，通常直接放弃当次学习」。诊断卡片读的是库，对话读的是手写常量，
+ * 两者一旦漂移，同一屏上就会出现两个出处——这是最不该发生的失分点。
+ */
+const pCurrentLaw = findPoint('p15-5')! // 串、并联电路中电流的规律
+const pSeriesParallel = findPoint('p15-3')! // 串联和并联 —— 故障分析的真正前置（查漏补缺往回查的落点）
+const pOhm = findPoint('p17-2')! // 欧姆定律
+const pDiscriminant = findPoint('m21-2-2')! // 公式法（含根的判别式）
+
 export const diagnosis: ProblemDiagnosis = {
-  subject: '物理',
+  subject: demoPoint.subject,
   grade: '九年级',
-  knowledgePoint: '串联电路故障分析',
-  problemType: '实验分析',
-  textbookChapter: '人教版物理九年级上册 第15章第2节《电流和电路》',
+  knowledgePoint: demoPoint.name,
+  problemType: '串联电路故障分析',
+  textbookChapter: citeOf(demoPoint),
   isWeakPoint: true,
   weakPointNote: '近 30 天内，这个知识点你错过 4 次，是当前的重点关注项',
   ocrText:
@@ -317,10 +568,18 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '在动笔之前我先确认一下 —— 你还记得课堂中关于【串联电路的特点】吗？' },
     ],
     sensing: '先探测认知基础，再决定从哪里讲起，避免问了也白问',
+    /* 状态类问句 —— 学生在报告「自己记不记得」，不是在猜学科答案，选项合法。
+       但「记得/不记得」只是两个格子，真实状态常在中间（「记得一点」「公式忘了」），
+       所以给一个兜底入口让他自己说。 */
     options: [
       { label: '不记得了', next: 'p2-teach-1', echo: '不记得了' },
       { label: '记得', next: 'p2-known', echo: '记得' },
     ],
+    freeInput: {
+      hint: '都不太像？',
+      placeholder: '那你自己说说 —— 记得哪一部分，哪一部分忘了……',
+      next: 'p2-teach-1',
+    },
   },
 
   /* ===== 分支A：不记得 → 从基础概念开始教（苏格拉底式提问） ===== */
@@ -335,9 +594,33 @@ export const script: Record<string, ScriptNode> = {
       },
     ],
     sensing: '苏格拉底式提问：用生活经验搭桥，不直接给结论',
+    /* 内容类问题（彩灯串会怎样）→ 开放输入。学生的说法可能五花八门（「烧了」「接触不良」），
+       都是真想法；给两个选项等于逼他在「会亮 / 不会亮」里认领一个。 */
+    input: {
+      channel: 'express',
+      placeholder: '说说你觉得会怎样，为什么……',
+      quickFill: '不会亮了，因为只有一条线串着，断了一处整串都不通',
+      next: 'p2-teach-1-check',
+      scaffolds: [
+        '先别看整串灯。就看被拧下来那个灯泡的位置 —— 那儿原本是通电线的，现在成了一个什么？',
+        '这一串灯只有一条线串着。线上破了个口子，电流还过得去吗？',
+      ],
+      simulatedSay: '呃……我觉得不会亮吧，因为那个灯泡拿掉了就断了，电就过不去了',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
+  },
+  'p2-teach-1-check': {
+    id: 'p2-teach-1-check',
+    stage: 2,
+    bubbles: [
+      { kind: 'ai', text: '好。' },
+      { kind: 'ai', text: '我们对一条：串联电路只有一条路可走，任何一处断开，整条路都不通。' },
+      { kind: 'ai', text: '按这条回头看，你刚才说的对得上吗？' },
+    ],
+    sensing: '给出串联电路的关键判据让学生自己确认，不由 AI 判对错',
     options: [
-      { label: '不会亮了', next: 'p2-teach-2', correct: true, echo: '不会亮了' },
-      { label: '其他的还会亮', next: 'p2-teach-retry', echo: '其他的还会亮' },
+      { label: '对得上', next: 'p2-teach-2', correct: true, echo: '对得上' },
+      { label: '我原来想岔了', next: 'p2-teach-retry', echo: '我原来想岔了' },
     ],
   },
   'p2-teach-retry': {
@@ -348,7 +631,18 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '这一串灯只有一条电线串着，中间被拧下一个灯泡，就等于电线断了个口子。电流还能通过去吗？' },
     ],
     sensing: '识别到理解卡点，降低问题难度、换角度再问一次（不评价对错）',
-    options: [{ label: '过不去了', next: 'p2-teach-2', correct: true, echo: '过不去了' }],
+    /* 这是换角度引导的台阶 —— 台阶上更不该把答案印在按钮上 */
+    input: {
+      channel: 'express',
+      placeholder: '那电流还过得去吗？说说看……',
+      next: 'p2-teach-2',
+      scaffolds: [
+        '先不看灯泡。电流从电源出发，要走的那条路是不是只有一条？',
+        '这条路上现在被拧下来一个灯泡，等于多了个缺口 —— 电流走到缺口那儿，会怎么样？',
+      ],
+      simulatedSay: '过不去啊，都断了',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
   },
   'p2-teach-2': {
     id: 'p2-teach-2',
@@ -357,7 +651,7 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'praise', text: '对了！你想得很好！' },
       { kind: 'ai', text: '这就是串联电路最关键的地方：电流只有一条路可以走，任何一处断开，整条电路都不通了。' },
       { kind: 'ai', text: '由此得到结论 —— 串联电路中，电流处处相等。' },
-      { kind: 'cite', text: '这个知识点在【人教版物理九年级上册 第15章第2节】' },
+      { kind: 'cite', text: `这个知识点在【${citeOf(pCurrentLaw)}】` },
     ],
     options: [{ label: '明白了', next: 'p2-recite', echo: '明白了' }],
   },
@@ -381,7 +675,7 @@ export const script: Record<string, ScriptNode> = {
         text: '串联电路只有一条电流路径，所以任何一处断开，整条电路都不通 —— 这就是两只灯都不亮的原因。',
       },
       { kind: 'ai', text: '由此得到结论 —— 串联电路中，电流处处相等。' },
-      { kind: 'cite', text: '这个知识点在【人教版物理九年级上册 第15章第2节】' },
+      { kind: 'cite', text: `这个知识点在【${citeOf(pCurrentLaw)}】` },
     ],
     options: [{ label: '明白了', next: 'p2-recite', echo: '明白了' }],
   },
@@ -406,7 +700,7 @@ export const script: Record<string, ScriptNode> = {
     stage: 2,
     bubbles: [
       { kind: 'ai', text: '很好，那我们就直接从解题思路开始。' },
-      { kind: 'cite', text: '本题考纲落点：【人教版物理九年级上册 第15章第2节】串联电路的电流特点' },
+      { kind: 'cite', text: `本题考纲落点：【${citeOf(demoPoint)}】` },
     ],
     options: [{ label: '开始吧', next: 'p2-step1', echo: '开始吧' }],
   },
@@ -422,7 +716,7 @@ export const script: Record<string, ScriptNode> = {
         kind: 'ai',
         text: '判故障就一句话 —— 电压表读数为 0 的元件是好的，读到电源电压的那只才是断点。所以本题断点在 L₂。',
       },
-      { kind: 'cite', text: '教科书原文出处：【人教版物理九年级上册 第15章第2节】' },
+      { kind: 'cite', text: `教科书原文出处：【${citeOf(demoPoint)}】` },
       { kind: 'ai', text: '快讲不等于跳过检验。来一道题，确认你真的会了。' },
     ],
     sensing: '快讲档仍保留阶段5检验闭环：直接讲的必须是教材原文级内容（准确率兜底原则）',
@@ -443,10 +737,42 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '好，那我们回到这道题上。' },
       { kind: 'ai', text: '两只灯都不发光，你觉得电路现在最可能是什么状态？' },
     ],
+    /*
+     * 内容类问题 → 只给开放输入，不给候选结论。
+     *
+     * 这里原来是「断路 / 短路 / 电源没电」三选一。问题不在选项本身，在于
+     * 它把「从现象推理出结论」这一步替学生做完了 —— 学生的任务从「生成」
+     * 降级成「识别」，启发式引导的价值被选项的提示性抵消。而且学生的真实
+     * 想法常常不在选项里（「开关没合上」「灯丝断了」），被迫选一个「最像的」，
+     * 就是思维定式。
+     *
+     * 判对错交给下一个节点：不评判，只给一条证据让学生自己对。
+     */
+    input: {
+      channel: 'express',
+      placeholder: '说说你的判断，还有你这么想的理由……',
+      quickFill: '两只灯都不亮，我猜是电路哪里断开了',
+      next: 'p2-step1-check',
+      scaffolds: [
+        '不用急着下结论。先看一个事实：电压表测 L₂ 两端时有示数，而且等于电源电压 —— 这说明电源本身有没有在工作？',
+        '再想一层：如果是某处断开了，把电压表接在断开的位置两端，它会读到什么？',
+      ],
+      simulatedSay: '我觉得是哪里断了吧，因为两个灯都不亮',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
+  },
+  'p2-step1-check': {
+    id: 'p2-step1-check',
+    stage: 2,
+    bubbles: [
+      { kind: 'ai', text: '好，我把你说的记下来了。' },
+      { kind: 'ai', text: '我们对一条证据：电压表测 L₂ 两端时有示数，而且等于电源电压 —— 这说明电是通的，只是被"截"在了某处。' },
+      { kind: 'ai', text: '拿这条证据回头看你刚才的判断，对得上吗？' },
+    ],
+    sensing: '不评判学生的判断，而是给出一条证据让他自己对 —— 对应课标「推理论证」',
     options: [
-      { label: '电路某处断路了', next: 'p2-step2', correct: true, echo: '电路某处断路了' },
-      { label: '电路发生了短路', next: 'p2-step1-wrong', echo: '电路发生了短路' },
-      { label: '电源没电了', next: 'p2-step1-wrong', echo: '电源没电了' },
+      { label: '对得上', next: 'p2-step2', correct: true, echo: '对得上' },
+      { label: '好像对不上，我再想想', next: 'p2-step1-wrong', echo: '好像对不上，我再想想' },
     ],
   },
   'p2-step1-wrong': {
@@ -461,7 +787,9 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '所以更合理的判断是 —— 电路里有一处断开了。' },
     ],
     sensing: '追问「为什么这么想」，定位认知偏差后换个角度引导',
-    options: [{ label: '我明白了，是断路', next: 'p2-step2', correct: true, echo: '我明白了，是断路' }],
+    /* 结论已经在上面那句气泡里讲了，按钮只表达学生「懂了没有」——
+       别把答案再抄一遍到按钮上，那会让人以为是自己答出来的 */
+    options: [{ label: '我明白了', next: 'p2-step2', correct: true, echo: '我明白了' }],
   },
   'p2-step2': {
     id: 'p2-step2',
@@ -490,9 +818,32 @@ export const script: Record<string, ScriptNode> = {
       quote: '电压表内部几乎没有电阻，接进电路不会改变电路原来的状态',
       fix: '正好说反了 —— 电压表的内阻**极大**，理想情况下相当于断路；内阻极小的那个是电流表。正因为它的内阻大，把它并在断掉的那只灯两端时，回路里几乎没有电流，电源电压几乎全落在断点处，读数才等于电源电压。这也正是它能拿来找断点的原因。',
     },
+    /* 同上：内容类问题（断点在谁身上）→ 开放输入，判对错交给下一个「对证据」节点 */
+    input: {
+      channel: 'express',
+      placeholder: '你觉得断点在谁身上？说说理由……',
+      quickFill: '断点在 L₂，因为电压表跨在它两端读到了电源电压',
+      next: 'p2-step2-check',
+      scaffolds: [
+        '先把两个读数分开看。测 L₁ 读到 0 —— 电流通过 L₁ 的时候，顺不顺畅？',
+        '而测 L₂ 读到了电源电压。电压表要读到这么大的数，它两端得是什么情况？',
+      ],
+      simulatedSay: '应该是 L₂ 吧，因为电压表接在它两头有读数',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
+  },
+  'p2-step2-check': {
+    id: 'p2-step2-check',
+    stage: 2,
+    bubbles: [
+      { kind: 'ai', text: '我记下了。' },
+      { kind: 'ai', text: '对一条：断掉的那个元件，电压表反而会"隔着"它测到电源电压；而好的那个，两端几乎没有电压差。' },
+      { kind: 'ai', text: '用这条回头看你刚才说的，对得上吗？' },
+    ],
+    sensing: '给一条判据让学生自检 —— 学生自己纠回来的，比我说「对了」更有用',
     options: [
-      { label: '断点在 L₂', next: 'p2-step3', correct: true, echo: '断点在 L₂' },
-      { label: '断点在 L₁', next: 'p2-step2-wrong', echo: '断点在 L₁' },
+      { label: '对得上', next: 'p2-step3', correct: true, echo: '对得上' },
+      { label: '我再想想', next: 'p2-step2-wrong', echo: '我再想想' },
     ],
   },
   'p2-step2-wrong': {
@@ -510,7 +861,8 @@ export const script: Record<string, ScriptNode> = {
       },
     ],
     sensing: '连续两次偏差，节奏已放慢：拆成更小的一步，先讲清再提问',
-    options: [{ label: '原来是这样，那就是 L₂', next: 'p2-step3', correct: true, echo: '原来是这样，那就是 L₂' }],
+    /* 同上：结论归气泡，按钮只说状态 */
+    options: [{ label: '原来是这样', next: 'p2-step3', correct: true, echo: '原来是这样' }],
   },
   'p2-step3': {
     id: 'p2-step3',
@@ -545,10 +897,18 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '你是怎么想的？能跟我说说你的判断过程吗？' },
     ],
     sensing: '不直接给标准答案，先请学生复述过程，再定位错误环节',
+    /* 状态类问句 —— 学生报告的是「自己的思路」，选项是帮他命名，不是替他答。
+       两条选项是常见错因，但真实错因往往更细（「我把电流表电压表搞反了」），
+       必须有兜底入口。**这里不能用选项替代学生自己表述**（核心流程说明 阶段4）。 */
     options: [
       { label: '我以为电压是 0 就说明它坏了', next: 'p4-locate', echo: '我以为电压是 0 就说明它坏了' },
       { label: '我记混了电压表的接法', next: 'p4-locate', echo: '我记混了电压表的接法' },
     ],
+    freeInput: {
+      hint: '都不是？',
+      placeholder: '那你自己说说当时的想法，说错也没关系……',
+      next: 'p4-locate',
+    },
   },
   'p4-locate': {
     id: 'p4-locate',
@@ -562,7 +922,18 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '回到这一步，再判断一次：断点在哪？' },
     ],
     sensing: '二次引导：回到出错的那一步，让学生自己再答一次',
-    options: [{ label: '断点在 L₂', next: 'p4-recover', correct: true, echo: '断点在 L₂' }],
+    /* 二次引导仍然是内容类问题 —— 学生要自己把结论说出来，不是从按钮上认领 */
+    input: {
+      channel: 'express',
+      placeholder: '再判断一次：断点在哪？说说你怎么看出来的……',
+      next: 'p4-recover',
+      scaffolds: [
+        '先看题目给的两个读数：接 L₁ 两端读数是 0，接 L₂ 两端读到电源电压。哪一个数说明「这里通得顺畅」？',
+        '反过来想：哪个地方断了，电压表才会「隔着」它读到电源电压？',
+      ],
+      simulatedSay: '嗯……那断的就是 L₂ 了',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
   },
   'p4-recover': {
     id: 'p4-recover',
@@ -587,14 +958,39 @@ export const script: Record<string, ScriptNode> = {
     ],
     sensing: '巩固练习验证标准：逻辑题只要求说出完整思路，不必算出数值答案',
     interestContext: '篮球',
-    options: [
+    /*
+     * 阶段5 是整条链的验收环节 —— 验的是「能不能把同一套逻辑搬到新题上」。
+     * 原来第一个选项把完整推理写在了按钮上：学生点一下，迁移就变成了认领。
+     * 这一处是整个流程里最不能给选项的地方。
+     */
+    input: {
+      channel: 'express',
+      placeholder: '说说你会怎么判断，不用算数值……',
+      next: 'p5-quiz-check',
+      scaffolds: [
+        '先别管断点在哪。电流表无示数这一条，说明这条路上有没有电流？',
+        '再看电压表：它接在 R₂ 两端能读到数 —— 电是不是已经通到 R₂ 那儿了？',
+      ],
+      simulatedSay: '电流表没示数说明断了，然后电压表接在 R₂ 上有数，那断的就是 R₂',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
+  },
+  'p5-quiz-check': {
+    id: 'p5-quiz-check',
+    stage: 5,
+    bubbles: [
+      { kind: 'ai', text: '我记下来了。' },
       {
-        label: '电流表无示数说明断路；电压表在 R₂ 两端有示数，断点就在 R₂',
-        next: 'p5-mastered',
-        correct: true,
-        echo: '电流表无示数说明断路；电压表在 R₂ 两端有示数，断点就在 R₂',
+        kind: 'ai',
+        text: '对一条：电流表无示数，说明这条路上没有电流；电压表能在 R₂ 两端读到数，说明电是通到那儿的 —— 只是被截在了 R₂。',
       },
-      { label: '应该是电流表坏了', next: 'p5-retry', echo: '应该是电流表坏了' },
+      { kind: 'ai', text: '用这条回头看你刚才说的，对得上吗？' },
+    ],
+    sensing: '阶段5 给判据让学生自核 —— 验的是迁移，不是记没记住那个选项',
+    /* 结论是学生自己刚说过的，按钮不必再抄一遍 */
+    options: [
+      { label: '对得上', next: 'p5-mastered', correct: true, echo: '对得上' },
+      { label: '我再想想', next: 'p5-retry', echo: '我再想想' },
     ],
   },
   'p5-retry': {
@@ -605,13 +1001,29 @@ export const script: Record<string, ScriptNode> = {
       { kind: 'ai', text: '刚才那条线索还记得吗 —— 电压表能测到电压的地方，往往就是断开的地方。' },
     ],
     sensing: '思路仍有偏差：再次引导一次，仍未通过则标记为「需二次巩固」',
+    input: {
+      channel: 'express',
+      placeholder: '那按这两条线索，你会怎么判断？',
+      next: 'p5-retry-check',
+      scaffolds: [
+        '先答一个小问题：电压表能读到数，说明它和电源之间这条路是通的，还是断的？',
+        '那再想：如果断的是电流表自己，电压表还能在 R₂ 两端读到数吗？',
+      ],
+      simulatedSay: '电压表有数说明这里是通的，所以断的应该是 R₂',
+      scaffoldPlaceholder: '先回答那个小问题就好……',
+    },
+  },
+  'p5-retry-check': {
+    id: 'p5-retry-check',
+    stage: 5,
+    bubbles: [
+      { kind: 'ai', text: '嗯。' },
+      { kind: 'ai', text: '对一条：电压表能读到数的地方，电是通到那儿的；读不到数的地方，才是断的。' },
+      { kind: 'ai', text: '按这条再看一次，对得上吗？' },
+    ],
+    sensing: '最后一次给判据；仍对不上就走「需二次巩固」，不呈现为失败',
     options: [
-      {
-        label: '哦！断路了，而且断点在 R₂',
-        next: 'p5-mastered',
-        correct: true,
-        echo: '哦！断路了，而且断点在 R₂',
-      },
+      { label: '对得上', next: 'p5-mastered', correct: true, echo: '对得上' },
       { label: '我还是有点绕', next: 'p5-need-review', echo: '我还是有点绕' },
     ],
   },
@@ -665,84 +1077,176 @@ export const sessionRecord: SessionRecord = {
  * 定位说明 3.3：我的错题记录 / 我的薄弱知识点 / 我的进步曲线
  * 定位说明 3.4：仅使用学生个人学情数据，不与其他学生对比
  * ------------------------------------------------------------------ */
-export const wrongProblems: WrongProblem[] = [
+/**
+ * 错题记录：只声明「哪道题、错在哪、是库里哪个知识点的哪类题型」，
+ * 学科和知识点名一律从知识点库查 —— 见 WrongProblem 类型上的说明。
+ */
+const wrongSeeds: {
+  id: string
+  date: string
+  pointId: string
+  /**
+   * 考点名（学生看到的）。**比知识点名更具体** ——
+   * 「串、并联电路中电压的规律」学生看着没感觉，
+   * 「串联电路故障分析」他才会说「对，我就是这块不行」。
+   */
+  point: string
+  title: string
+  reason: string
+  mastered: boolean
+}[] = [
   {
     id: 'w1',
     date: '09-09',
-    subject: '物理',
+    pointId: 'p16-2',
+    point: '串联电路故障分析',
     title: '串联电路两灯均不亮，判断故障位置',
-    knowledgePoint: '串联电路故障分析',
     reason: '把「电压为 0」误当成元件损坏',
     mastered: true,
   },
   {
     id: 'w2',
     date: '09-06',
-    subject: '物理',
+    pointId: 'p17-4',
+    point: '动态电路分析',
     title: '滑动变阻器移动时电流表示数变化',
-    knowledgePoint: '欧姆定律的应用',
     reason: '没有先判断电路连接方式',
     mastered: false,
   },
   {
     id: 'w3',
     date: '09-04',
-    subject: '数学',
+    pointId: 'm21-2-2',
+    point: '一元二次方程根的判别式',
     title: '已知方程有两个不相等实数根，求 m 取值范围',
-    knowledgePoint: '一元二次方程根的判别式',
     reason: '漏掉了二次项系数不为 0 的条件',
     mastered: false,
   },
   {
     id: 'w4',
     date: '09-02',
-    subject: '物理',
+    pointId: 'p15-5',
+    point: '并联电路电流规律',
     title: '并联电路中干路电流的计算',
-    knowledgePoint: '并联电路电流规律',
     reason: '串并联特点混淆',
     mastered: true,
   },
   {
     id: 'w5',
     date: '08-30',
-    subject: '数学',
+    pointId: 'm22-2',
+    point: '二次函数与一元二次方程',
     title: '二次函数图象与 x 轴交点个数判断',
-    knowledgePoint: '二次函数与一元二次方程',
     reason: '判别式符号判断出错',
     mastered: true,
   },
 ]
 
-export const weakPoints: WeakPoint[] = [
+/**
+ * 薄弱点：只声明「哪个知识点、在库里的哪一环没打牢」，
+ * 名称、学科、教材出处、回溯点全部从知识点库算出来。
+ *
+ * ── 为什么回溯点要指向一个真实的库条目，而不是写一句话 ──────────
+ * 「系统判断根源在 X 没打牢」这句话，只有在 X 真的能被翻到、
+ * 而且系统真的能安排回去补的时候才成立。写成一句自由文本，
+ * 就只是一句好听的话 —— 家长问「那补哪一节」就答不上来。
+ *
+ * ⚠️ k2 故意**没有**回溯点：不是每个薄弱点都能一次定位到根。
+ * 系统只在有把握时才说「根在哪」，说不准就只说现象 ——
+ * 瞎归因比不归因更伤信任。
+ */
+const weakSeeds: {
+  id: string
+  pointId: string
+  /** 考点名，同上：比知识点名具体，学生才认得出自己 */
+  point: string
+  from: number
+  to: number
+  errorCount: number
+  traceBackPointId?: string
+  followUp?: FollowUp
+}[] = [
   {
     id: 'k1',
-    subject: '物理',
-    name: '串联电路故障分析',
-    chapter: '人教版物理九年级上册 第15章第2节',
+    pointId: 'p16-2',
+    point: '串联电路故障分析',
     from: 30,
     to: 70,
     errorCount: 4,
-    traceBack: '八年级下册《电流和电路》基础概念',
+    traceBackPointId: 'p15-3',
+    // 主线：刚识别出薄弱点，还没复查过 —— 走场景触发（下次做电路题时顺手查）
+    followUp: {
+      status: '待复查',
+      round: 0,
+      mode: '场景触发',
+      nextTrigger: '下次遇到电路题时，先插 1 道同类题复查',
+    },
   },
   {
     id: 'k2',
-    subject: '物理',
-    name: '欧姆定律的应用',
-    chapter: '人教版物理九年级上册 第17章第2节',
+    pointId: 'p17-4',
+    point: '动态电路分析',
     from: 45,
     to: 58,
     errorCount: 3,
+    // 第 1 轮复查已做，还没稳 —— 这一条用来演示「等不到场景时，时间兜底」
+    followUp: {
+      status: '复查中',
+      round: 1,
+      mode: '时间触发',
+      nextTrigger: '3 天内没再遇到动态电路题，改由周五提醒复查',
+    },
   },
   {
     id: 'k3',
-    subject: '数学',
-    name: '一元二次方程根的判别式',
-    chapter: '人教版数学九年级上册 第21章第2节',
+    pointId: 'm21-2-2',
+    point: '一元二次方程根的判别式',
     from: 52,
     to: 65,
     errorCount: 2,
+    traceBackPointId: 'm21-1',
+    // 出口：闭环必须有终点，否则薄弱点清单只增不减，家长会觉得产品在制造焦虑
+    followUp: {
+      status: '已巩固',
+      round: 2,
+      mode: '场景触发',
+      nextTrigger: '已连续两轮复查通过，移出重点；期中前再抽查一次',
+    },
   },
 ]
+
+/* 派生：学科与教材出处从库里查；考点名用种子给的（它比知识点名具体一档） */
+export const wrongProblems: WrongProblem[] = wrongSeeds.map(s => {
+  const p = findPoint(s.pointId)!
+  return {
+    id: s.id,
+    date: s.date,
+    pointId: s.pointId,
+    subject: p.subject,
+    title: s.title,
+    knowledgePoint: s.point,
+    reason: s.reason,
+    mastered: s.mastered,
+  }
+})
+
+export const weakPoints: WeakPoint[] = weakSeeds.map(s => {
+  const p = findPoint(s.pointId)!
+  const back = s.traceBackPointId ? findPoint(s.traceBackPointId) : undefined
+  return {
+    id: s.id,
+    pointId: s.pointId,
+    subject: p.subject,
+    name: s.point,
+    chapter: citeOf(p),
+    from: s.from,
+    to: s.to,
+    errorCount: s.errorCount,
+    traceBackPointId: s.traceBackPointId,
+    traceBack: back ? refOf(back) : undefined,
+    followUp: s.followUp,
+  }
+})
 
 /** 30 天进步曲线：只对比自己的过去，不做同伴排名 */
 export const progressCurve: ProgressPoint[] = [
@@ -768,19 +1272,19 @@ export const reviewCards = [
   {
     id: 'r1',
     name: '串联电路的电流特点',
-    chapter: '人教版物理九年级上册 第15章第2节',
+    chapter: citeOf(pCurrentLaw),
     content: '串联电路只有一条电流路径，电流处处相等：I = I₁ = I₂',
   },
   {
     id: 'r2',
     name: '欧姆定律',
-    chapter: '人教版物理九年级上册 第17章第2节',
+    chapter: citeOf(pOhm),
     content: '导体中的电流，跟导体两端的电压成正比，跟导体的电阻成反比：I = U / R',
   },
   {
     id: 'r3',
     name: '根的判别式',
-    chapter: '人教版数学九年级上册 第21章第2节',
+    chapter: citeOf(pDiscriminant),
     content: 'Δ = b² − 4ac；Δ > 0 两个不相等实数根，Δ = 0 两个相等实数根，Δ < 0 无实数根',
   },
 ]
@@ -891,7 +1395,7 @@ export const assistantThread: AssistantMessage[] = [
   },
   {
     from: 'ai',
-    text: '「串联电路故障分析」这个点，掌握度从 30% 到 70%。判断依据：9/9 那次他独立说出了完整判断链，没有要提示；同类变式题 4/5 通过。仍需巩固的是八年级下册的电流基础概念。',
+    text: `「串联电路故障分析」这个点，掌握度从 30% 到 70%。判断依据：9/9 那次他独立说出了完整判断链，没有要提示；同类变式题 4/5 通过。仍需巩固的是它前置的${refOf(pSeriesParallel)}基础概念。`,
     source: '数据来源：错题本 + 近 7 次辅导记录',
   },
   {
@@ -929,7 +1433,7 @@ export const assistantQuickAsks: AssistantQuickAsk[] = [
     chip: true,
     keys: ['没掌握', '还没会', '哪里薄弱', '薄弱点', '哪些还不会'],
     answer:
-      '两个：①「串联电路故障分析」掌握度 70%，还在巩固；② 八年级下册《电流和电路》基础概念 45%，是上面那一条的根因。本周涉及的其他知识点都在 80% 以上。',
+      `两个：①「串联电路故障分析」掌握度 70%，还在巩固；② 它前置的${refOf(pSeriesParallel)}基础概念 45%，是上面那一条的根因。本周涉及的其他知识点都在 80% 以上。`,
     source: '数据来源：近 30 天错题本 + 掌握度模型',
   },
   {
@@ -944,7 +1448,7 @@ export const assistantQuickAsks: AssistantQuickAsk[] = [
     label: '他为什么老在这里错？',
     keys: ['为什么错', '老错', '总错', '错在哪', '老在这'],
     answer:
-      '近 30 天该点出错 4 次，错误原因集中在同一处：把「电压为 0」当成元件损坏。往上追溯，八年级下册《电流和电路》基础概念不牢是根因。',
+      `近 30 天该点出错 4 次，错误原因集中在同一处：把「电压为 0」当成元件损坏。往上追溯，前置的${refOf(pSeriesParallel)}基础概念不牢是根因。`,
     source: '数据来源：错题本错误原因归类',
   },
 
@@ -967,11 +1471,11 @@ export const assistantQuickAsks: AssistantQuickAsk[] = [
     source: '依据：定位说明 3.2 · 自主感优先，不做评价性反馈',
   },
   {
-    label: '初二物理该重点关注什么？',
-    keys: ['初二物理', '物理重点', '物理该', '物理关注'],
+    label: '初三物理该重点关注什么？',
+    keys: ['初三物理', '物理重点', '物理该', '物理关注'],
     answer:
-      '初二上是分水岭，重点在三块：① 电路（串并联、故障分析）—— 抽象度陡增，是第一个容易掉队的点；② 密度与质量 —— 概念和计算结合；③ 光的折射 —— 对空间想象要求高。他目前卡在第①块，这也是我们排优先级的依据。',
-    source: '依据：人教版八年级上册教材结构 + 当前薄弱点分布',
+      '初三电学是分水岭，重点在三块：① 电路分析（串并联判断、故障分析）—— 抽象度陡增，是第一个容易掉队的点；② 欧姆定律与动态电路 —— 把电流、电压、电阻三个量串起来；③ 电功率 —— 计算量最大、最容易失分。他目前卡在第①块，这也是我们排优先级的依据。',
+    source: '依据：人教版九年级全一册教材结构 + 当前薄弱点分布',
   },
   {
     label: '我该怎么跟他说这件事？',
@@ -994,8 +1498,7 @@ export const assistantQuickAsks: AssistantQuickAsk[] = [
 
 export const planSuggestion: PlanSuggestion = {
   title: '本周重点巩固电路分析',
-  reason:
-    '近 30 天「串联电路故障分析」出错 4 次，是当前最高频的薄弱知识点；同时检测到八年级下册《电流和电路》基础概念不牢，建议先补基础再上难度。',
+  reason: `近 30 天「串联电路故障分析」出错 4 次，是当前最高频的薄弱知识点；同时检测到它前置的${refOf(pSeriesParallel)}基础不牢，建议先补基础再上难度。`,
   items: [
     '每天 1 题：串联电路故障分析（由易到难）',
     '周中安排 1 次八年级基础概念回溯（约 10 分钟）',

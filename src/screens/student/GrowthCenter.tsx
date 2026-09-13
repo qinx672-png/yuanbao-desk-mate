@@ -1,7 +1,14 @@
 import { useState } from 'react'
 import { wrongProblems, weakPoints, progressCurve, classNote } from '@/data/mockData'
 import { IconShield, IconCheck, IconArrowRight, IconClock } from '@/components/common/Icons'
-import type { ScreenId } from '@/types'
+import type { ScreenId, FollowUp } from '@/types'
+
+/* 跟进状态 → 配色。标签只放状态词，解释放在下面那行里 */
+const followUpTone: Record<FollowUp['status'], string> = {
+  待复查: 'bg-warm-50 text-warm-700',
+  复查中: 'bg-brand-50 text-brand-700',
+  已巩固: 'bg-cheer-50 text-cheer-700',
+}
 
 type Tab = 'wrong' | 'weak' | 'curve'
 
@@ -112,6 +119,10 @@ function WrongList() {
 function WeakList() {
   return (
     <div className="space-y-3">
+      <p className="text-[12px] text-ink-400 leading-relaxed">
+        识别出来不等于记住了。每个薄弱点都会排一次复查——
+        优先在你下次做到同类题时顺手插一道，等不到才用时间提醒。
+      </p>
       {weakPoints.map(w => (
         <div key={w.id} className="card p-4">
           <div className="flex items-center gap-2 mb-1.5">
@@ -123,6 +134,12 @@ function WeakList() {
               {w.subject}
             </span>
             <span className="text-[15.5px] font-bold text-ink-900">{w.name}</span>
+            {/* 跟进状态：这一条回答的是「然后呢」——识别完就没下文，是最容易被评委追问的地方 */}
+            {w.followUp && (
+              <span className={`chip text-[11px] ml-auto shrink-0 ${followUpTone[w.followUp.status]}`}>
+                {w.followUp.status}
+              </span>
+            )}
           </div>
           <div className="text-[12px] text-ink-400 mb-3">📚 {w.chapter}</div>
 
@@ -145,6 +162,25 @@ function WeakList() {
               <p className="text-[12.5px] text-brand-700/90 leading-relaxed">
                 这个知识点反复出错，可能是 {w.traceBack} 没打牢。我们先回去补一下，再往上学会轻松很多。
               </p>
+            </div>
+          )}
+
+          {/* 「持续跟进」这一环：什么时候复查、谁来记得 */}
+          {w.followUp && (
+            <div className="mt-3 rounded-xl bg-ink-50 border border-ink-100 px-3 py-2.5">
+              <div className="flex items-center gap-1.5 mb-1">
+                <IconClock className="w-3.5 h-3.5 text-ink-400 shrink-0" />
+                <span className="text-[12.5px] font-bold text-ink-700">
+                  下次怎么复查
+                  {w.followUp.round > 0 && (
+                    <span className="text-ink-400 font-medium"> · 第 {w.followUp.round} 轮</span>
+                  )}
+                </span>
+                <span className="chip bg-white text-ink-500 text-[10.5px] border border-ink-100 ml-auto shrink-0">
+                  {w.followUp.mode}
+                </span>
+              </div>
+              <p className="text-[12.5px] text-ink-500 leading-relaxed">{w.followUp.nextTrigger}</p>
             </div>
           )}
         </div>

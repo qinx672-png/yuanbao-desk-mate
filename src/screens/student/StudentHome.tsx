@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { student, weakPoints, reviewCards, todayTasks } from '@/data/mockData'
-import ClassmateAvatar, { findRole } from '@/components/common/ClassmateAvatar'
+import { findRole } from '@/components/common/ClassmateAvatar'
+import ClassmateAvatarV2 from '@/components/common/ClassmateAvatarV2'
 import { SketchFrame, Handwrite } from '@/components/common/SketchFrame'
 import TalkButton from '@/components/common/TalkButton'
 import { useSpeech, useListening, wait } from '@/hooks/useSpeech'
@@ -146,11 +147,20 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
       {
         kind: 'cite',
         chapter: wp.chapter,
-        sub: `掌握度 ${wp.from}% → ${wp.to}% · 底子在八年级《电流和电路》`,
+        // 底子从库里查（weakPoints.traceBack），不手写 —— 手写过一次，写成了八年级《电流和电路》，是错的
+        sub: `掌握度 ${wp.from}% → ${wp.to}% · 底子在${wp.traceBack ?? '前面的基础章节'}`,
       },
       id,
     )
     await say(`近 30 天你错过了 ${wp.errorCount} 次，而且每次都是同一个环节。要不要接着弄明白？`, id)
+    /*
+     * 「持续跟进」在演示动线里真的发生一次 —— 这一句是整条闭环的收口：
+     * 不是发提醒让学生自己去复习，而是他本来就要做这道题时，系统顺手插一道复查。
+     * 触发条件就是 weakPoints[0].followUp.nextTrigger 里写的那句。
+     */
+    if (wp.followUp && wp.followUp.status !== '已巩固') {
+      await say('对了，上次说好要复查的——今天正好又要做电路题，我先插一道短的，看看是不是真记住了。', id)
+    }
     if (alive(id)) setPhase('waiting')
   }
 
@@ -252,7 +262,8 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
 
       {/* 同桌身份条 */}
       <div className="shrink-0 bg-gradient-to-b from-white to-[#eaf2fb] px-4 pt-1.5 pb-2 border-b border-ink-100/70 flex items-center gap-2.5">
-        <ClassmateAvatar mood={thinking ? 'thinking' : phase === 'busy' ? 'explaining' : 'listening'} size={38} roleId={roleId} />
+        {/* 38px 太小：符号层缩到 0.95px 会变成噪点，所以只用 A 版（五官），状态交给右边的文字 */}
+        <ClassmateAvatarV2 mood={thinking ? 'thinking' : phase === 'busy' ? 'explaining' : 'listening'} size={38} roleId={roleId} variant="A" />
         <span className="text-[14px] font-bold text-ink-900">你的同桌 · {role.name}</span>
         <span className="chip bg-brand-50 text-brand-700 text-[10.5px]">{role.style}</span>
         <span className="ml-auto text-[11.5px] text-ink-400 truncate">

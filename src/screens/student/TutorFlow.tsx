@@ -5,17 +5,18 @@ import {
   answerChoices,
   stageMetas,
   diagnosis,
-  guideDepths,
-  depthRewrite,
+  teachingModes,
   depthHint,
   fallbackLoopFor,
   noErrorChallengeReply,
   exitOptions,
   interestContexts,
 } from '@/data/mockData'
-import ClassmateAvatar, { moodFromBubbleKind, findRole, type ClassmateMood } from '@/components/common/ClassmateAvatar'
+import { moodFromBubbleKind, findRole, type ClassmateMood } from '@/components/common/ClassmateAvatar'
+import ClassmateAvatarV2 from '@/components/common/ClassmateAvatarV2'
 import PhotoUpload from '@/screens/student/PhotoUpload'
 import { IconBook, IconClock, IconMic, IconCamera, IconPencil, IconCheck, IconSpark, IconShield } from '@/components/common/Icons'
+import { useListening, wait } from '@/hooks/useSpeech'
 
 /**
  * 屏05 · 数字同桌启发式引导（阶段 2-5）
@@ -33,7 +34,24 @@ import { IconBook, IconClock, IconMic, IconCamera, IconPencil, IconCheck, IconSp
  *    退出面板提供 换简单题 / 存断点 / 今天先放一放，不追问原因、不留未完成标记。
  *
  * 沿用的既有规则：先探测认知基础再决定从哪讲、教材溯源、答对必给正向反馈、巩固题只要思路。
+ *
+ * ── 2026-09-12：三档从「改写表」升级成「教法插件」────────────
+ * 每档现在是一份自包含声明（见 types 的 TeachingMode），本文件不再认识
+ * 「深聊/标准/快讲」这三个具体的档 —— 它只认格式。加第四档时，
+ * **这个文件一行都不用改**，加一份数据就行。
+ *
+ * 切档只有「点」这一条通道：顶栏档位芯片 / 底部「换讲法」按钮 → 面板里选。
+ *
+ * 曾经加过「说」—— 面板里挂个麦克风，说一句「讲细一点」就切。2026-09-12 砍掉：
+ * 面板本来就是一按就开、点一下就切，再让学生说一遍比直接点还多两步。
+ * 秦肖验收时的原话：「现在点开三档可选就很直接很方便，没有必要加上再说一遍的选项。」
+ *
+ * 注意这跟「说/点/写三通道等价」不冲突 —— 那条规矩管的是**作答**
+ * （学生的主要动作，值得给三条路）；换讲法是个小控件，点一下就够了。
  */
+
+/** 取某一档的教法声明。找不到就退回默认档 —— 别让一个坏 key 把整页打崩 */
+const modeOf = (d: GuideDepth) => teachingModes.find(m => m.key === d) ?? teachingModes[1]
 
 interface Props {
   roleId: string
@@ -62,6 +80,16 @@ const VIA_HEAD: Record<AnswerVia, string> = {
 
 const TYPE_DELAY = 520
 
+/**
+ * 开口的句式脚手架 —— 只教「怎么开口」，不含任何学科内容。
+ *
+ * 为什么不给「示范答案」：那和把答案印在选项按钮上是同一件事，只是换了个位置。
+ * 孩子卡住有两种原因，得分开接：
+ *   · 有想法，但不知道那句话怎么起头 —— 给句式（这一排）
+ *   · 根本没想法，问题太大了       —— 给「问小一点」（接脚手架，降的是粒度）
+ */
+const EXPRESS_STARTERS = ['我觉得是……，因为……', '我先看到……，所以猜……', '我不太确定，但我想……']
+
 export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoot, onShoot, onShootNew }: Props) {
   const role = findRole(roleId)
   const [history, setHistory] = useState<Bubble[]>([])
@@ -78,15 +106,36 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
   const [showExit, setShowExit] = useState(false)
   const [challenged, setChallenged] = useState(false)
   const [answerVia, setAnswerVia] = useState<AnswerVia>('type')
+  /**
+   * 脚手架展开到第几层（0 = 没展开）。
+   * 学生卡住时降低的是**问题的粒度**，不是把候选答案递过去 ——
+   * 答案一摆出来，任务就从「生成」降级成「识别」了。
+   */
+  const [scaffoldStep, setScaffoldStep] = useState(0)
+  /** 状态类问句的兜底入口：两个选项都不像他的情况时，让他自己说 */
+  const [freeOpen, setFreeOpen] = useState(false)
+
+  /* ── 语音：说 / 点 / 写 三条等价通道里的第一条（复用已有语音层） ── */
+  const { listen } = useListening()
+  const [listening, setListening] = useState(false)
+  /** 这句是真听懂的还是原型模拟的 —— 界面如实标出来，不装作真听懂了 */
+  const [heard, setHeard] = useState<'real' | 'mock' | null>(null)
+  /** 「不知道怎么说」面板：句式脚手架 + 问小一点 */
+  const [helperOpen, setHelperOpen] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   /** 档位改写：同一份内容换讲法（快讲 → 跳过苏格拉底链，直接结论＋验证题） */
-  const resolveId = useCallback((id: string, d: GuideDepth) => depthRewrite[d][id] ?? id, [])
+  const resolveId = useCallback((id: string, d: GuideDepth) => modeOf(d).rewrite[id] ?? id, [])
 
   const enter = useCallback(
     (id: string, d: GuideDepth = depth) => {
       const n = script[resolveId(id, d)]
       setNode(n)
+      setScaffoldStep(0) // 换节点必须收起脚手架，否则上一步的小问题会串到下一步
+      setFreeOpen(false)
+      setHelperOpen(false)
+      setHeard(null)
+      setDraft('')
       const bubbles: Bubble[] = n.sensing ? [{ kind: 'sensing', text: n.sensing }, ...n.bubbles] : [...n.bubbles]
       setQueue(bubbles)
     },
@@ -143,11 +192,41 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
 
   const submitInput = () => {
     if (!node.input) return
-    const text = draft.trim() || node.input.quickFill
+    // 开放作答没有 quickFill：空着不能提交，否则「写完了」就成了跳过键
+    const text = draft.trim() || node.input.quickFill || ''
+    if (!text) return
     writeStudent(text)
     setDraft('')
     setMood('thinking')
     enter(node.input.next)
+  }
+
+  /** 状态类问句的兜底：学生用自己的话报告状态（选项盖不住的那部分） */
+  const submitFree = () => {
+    if (!node.freeInput) return
+    const text = draft.trim()
+    if (!text) return
+    setFreeOpen(false)
+    pick(text, node.freeInput.next, text)
+  }
+
+  /**
+   * 让同桌听学生说。
+   *
+   * 识别结果**不直接提交**，先落进输入框让学生看一眼 —— 识别错一个字，
+   * 就可能把一个本来想对了的孩子判成答错，那比一开始不给选项伤得重。
+   * 看一眼、改一下，再交出去。
+   */
+  const talk = async () => {
+    if (!node.input || listening) return
+    setListening(true)
+    // 陪一个最短「我在听…」的时长：模拟识别是瞬时返回的，
+    // 不垫一下，学生按下去会觉得没反应（真识别本来就要等）
+    const [r] = await Promise.all([listen(node.input.simulatedSay ?? ''), wait(900)])
+    setListening(false)
+    if (!r.text) return
+    setDraft(r.text)
+    setHeard(r.real ? 'real' : 'mock')
   }
 
   const submitAnswer = (label: string, next: string) => {
@@ -157,12 +236,15 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
     enter(next)
   }
 
-  /** 切换引导深度：立刻用新档位重讲当前这一步，不用回退重来 */
+  /**
+   * 切换引导深度：立刻用新档位重讲当前这一步，不用回退重来。
+   */
   const switchDepth = (d: GuideDepth) => {
     setShowDepth(false)
     if (d === depth) return
     onDepthChange(d)
-    setHistory(h => [...h, { kind: 'system', text: `已切换到【${d}】· ${guideDepths.find(g => g.key === d)?.desc}` }])
+    const m = modeOf(d)
+    setHistory(h => [...h, { kind: 'system', text: `已切换到【${d}】· ${m.desc}` }])
     enter(node.id, d)
   }
 
@@ -267,7 +349,8 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
       <div className="shrink-0 bg-gradient-to-b from-white to-[#eaf2fb] px-4 pt-3 pb-2.5 border-b border-ink-100/70">
         <div className="flex items-center gap-3">
           <div className="relative">
-            <ClassmateAvatar mood={mood} size={64} roleId={roleId} />
+            {/* 64px 是形象的主要展示位，用 V2-B：头歪 + 状态符号，六种表情一眼可分 */}
+            <ClassmateAvatarV2 mood={mood} size={64} roleId={roleId} variant="B" />
             {waiting && (
               <span className="absolute -bottom-0.5 -right-0.5 w-4 h-4 bg-cheer-500 rounded-full border-2 border-white">
                 <span className="absolute inset-0 animate-ping rounded-full bg-cheer-400 opacity-60" />
@@ -431,8 +514,13 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
           </div>
         )}
 
-        {/* 同学翻开的"下一页"：以选项按钮形式呈现，但文案是同学给你翻的一页 */}
-        {mode === 'chat' && !waiting && node.options && (
+        {/*
+          选项区 —— 只留给**状态类**问句：
+          「你还记得吗」「你是怎么想的」问的是学生自己的状态，
+          选项是在帮他命名，不是在替他作答，所以合法。
+          （内容类问句不给选项，见下面 node.input 那段）
+        */}
+        {mode === 'chat' && !waiting && node.options && !freeOpen && (
           <div className="space-y-2.5 animate-fadeUp">
             {currentInterest && (
               <div className="rounded-xl bg-warm-50 border border-warm-100 px-3 py-2 text-[12px] text-warm-700 leading-relaxed">
@@ -452,31 +540,156 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
                 {o.label}
               </button>
             ))}
+            {/* 两个选项永远盖不住所有真实状态 —— 留个开口，
+                别让学生被迫认领一个「最像的」（那才是思维定式） */}
+            {node.freeInput && (
+              <button
+                onClick={() => setFreeOpen(true)}
+                className="tap w-full py-1.5 text-[12.5px] text-ink-400 underline underline-offset-2"
+              >
+                {node.freeInput.hint}我自己说
+              </button>
+            )}
           </div>
         )}
 
-        {/* 复述输入 */}
-        {mode === 'chat' && !waiting && node.input && (
+        {/* 兜底入口展开后：学生用自己的话报告状态，选项让位 */}
+        {mode === 'chat' && !waiting && node.freeInput && freeOpen && (
           <div className="animate-fadeUp">
-            <div className="text-[12.5px] text-ink-400 mb-2">自己写一遍给同学看：</div>
+            <div className="text-[12.5px] text-ink-400 mb-2">那你自己说，说多短都行：</div>
             <textarea
               value={draft}
               onChange={e => setDraft(e.target.value)}
-              placeholder={node.input.placeholder}
+              placeholder={node.freeInput.placeholder}
               rows={2}
               className="w-full rounded-2xl border-2 border-ink-100 px-4 py-3 text-[15px] leading-relaxed resize-none focus:border-brand-300 outline-none font-[cursive]"
             />
             <div className="flex gap-2.5 mt-2.5">
               <button
-                onClick={() => setDraft(node.input!.quickFill)}
+                onClick={() => {
+                  setFreeOpen(false)
+                  setDraft('')
+                }}
                 className="tap px-3 rounded-xl bg-ink-100 text-ink-700 text-[13px] font-semibold shrink-0"
               >
-                照着说一遍
+                回到选项
               </button>
-              <button className="btn-primary py-3 flex-1" onClick={submitInput}>
+              <button className="btn-primary py-3 flex-1 disabled:opacity-40" disabled={!draft.trim()} onClick={submitFree}>
                 写完了
               </button>
             </div>
+          </div>
+        )}
+
+        {/*
+          作答区 —— 两种通道分开：
+          · express 内容类：学生要自己说出学科结论，**只给开放输入**，
+            不给「照着说一遍」，卡住时给的是更小的问题（脚手架）；
+          · 缺省 复述类：照着说一遍定理/概念，保留原有行为。
+        */}
+        {mode === 'chat' && !waiting && node.input && (
+          <div className="animate-fadeUp">
+            <div className="text-[12.5px] text-ink-400 mb-2">
+              {node.input.channel === 'express' ? '同学把下一页翻过来，等你说说怎么想：' : '自己写一遍给同学看：'}
+            </div>
+
+            {/* 脚手架：把问题问小一点，但小问题本身仍要学生自己回答 */}
+            {scaffoldStep > 0 && node.input.scaffolds && (
+              <div className="mb-2.5 rounded-2xl bg-brand-50 border border-brand-100 px-3.5 py-3 space-y-2">
+                <div className="text-[11.5px] font-bold text-brand-700">同学把问题问小一点，你答这个就行：</div>
+                {node.input.scaffolds.slice(0, scaffoldStep).map((s, i) => (
+                  <div key={i} className="text-[13px] text-ink-700 leading-relaxed">
+                    {i + 1}. {s}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <textarea
+              value={draft}
+              onChange={e => setDraft(e.target.value)}
+              placeholder={
+                scaffoldStep > 0 && node.input.scaffoldPlaceholder
+                  ? node.input.scaffoldPlaceholder
+                  : node.input.placeholder
+              }
+              rows={2}
+              className="w-full rounded-2xl border-2 border-ink-100 px-4 py-3 text-[15px] leading-relaxed resize-none focus:border-brand-300 outline-none font-[cursive]"
+            />
+            {/* 说的字和写的字落在同一个地方，来源如实标出来 */}
+            {heard && (
+              <p className="text-[11px] text-ink-400 mt-1.5 leading-relaxed">
+                {heard === 'real'
+                  ? '上面是我听到的，不对就直接改。'
+                  : '（原型模拟识别）上面这句是原型替你写的 —— 真机上这里是识别结果，不对可以直接改。'}
+              </p>
+            )}
+
+            <div className="flex gap-2.5 mt-2.5">
+              {node.input.channel === 'express' ? (
+                <>
+                  {/* 说 —— 三条等价通道里的第一条（复用已有语音层）。
+                      语音适合表达思路（「我觉得是……因为……」），不适合报数值，
+                      所以只在开放作答出现，阶段3 的计算和起点诊断都不给。 */}
+                  <button
+                    onClick={talk}
+                    disabled={listening}
+                    className="tap px-3 rounded-xl bg-brand-500 text-white text-[13px] font-semibold shrink-0 flex items-center gap-1.5 disabled:bg-ink-200"
+                  >
+                    <IconMic className="w-4 h-4" />
+                    {listening ? '我在听…' : '说给同桌'}
+                  </button>
+                  <button
+                    onClick={() => setHelperOpen(o => !o)}
+                    className="tap px-3 rounded-xl bg-ink-100 text-ink-700 text-[13px] font-semibold shrink-0"
+                  >
+                    {helperOpen ? '收起' : '不知道怎么说'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => setDraft(node.input?.quickFill ?? '')}
+                  className="tap px-3 rounded-xl bg-ink-100 text-ink-700 text-[13px] font-semibold shrink-0"
+                >
+                  照着说一遍
+                </button>
+              )}
+              <button className="btn-primary py-3 flex-1 disabled:opacity-40" disabled={!draft.trim()} onClick={submitInput}>
+                {node.input.channel === 'express' ? '交给同桌' : '写完了'}
+              </button>
+            </div>
+
+            {/* 开口面板：给的是句式，不是答案 */}
+            {node.input.channel === 'express' && helperOpen && (
+              <div className="mt-2.5 rounded-2xl border border-dashed border-ink-200 bg-[#fffdf5] px-3.5 py-3 animate-fadeUp">
+                <div className="text-[11px] text-ink-400 mb-1.5">点一句就行 —— 这只是句式，不含答案</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {EXPRESS_STARTERS.map((s, i) => (
+                    <button
+                      key={s}
+                      onClick={() => setDraft(d => (d.trim() ? d.trimEnd() + ' ' : '') + s)}
+                      className={`tap rounded-lg border border-dashed border-ink-200 bg-white px-3 text-[13px] text-ink-700 ${
+                        i % 2 ? 'rotate-[.7deg]' : '-rotate-[.9deg]'
+                      }`}
+                    >
+                      「{s}」
+                    </button>
+                  ))}
+                </div>
+                {/* 另一种卡壳：不是不会说，是根本没想法 —— 那就把问题问小 */}
+                {node.input.scaffolds && scaffoldStep < node.input.scaffolds.length && (
+                  <button
+                    onClick={() => {
+                      setScaffoldStep(s => s + 1)
+                      setHelperOpen(false)
+                    }}
+                    className="tap w-full mt-2.5 rounded-xl bg-brand-50 border border-brand-100 px-3 py-2 text-left text-[12.5px] font-bold text-brand-700"
+                  >
+                    这个问题太大了，问小一点
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -493,24 +706,33 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
 
       {showDepth && (
         <div className="absolute inset-0 z-20 bg-ink-900/35 flex items-end p-4" onClick={() => setShowDepth(false)}>
-          <div className="w-full rounded-3xl bg-white p-4 shadow-card animate-fadeUp" onClick={e => e.stopPropagation()}>
+          <div
+            className="w-full max-h-[78%] overflow-y-auto scroll-area rounded-3xl bg-white p-4 shadow-card animate-fadeUp"
+            onClick={e => e.stopPropagation()}
+          >
             <div className="text-[16px] font-bold text-ink-900 mb-1">选择这次怎么讲</div>
-            <p className="text-[12.5px] text-ink-400 mb-3">启发式是默认值，不是唯一值；切档不会重置你的进度。</p>
+            <p className="text-[12.5px] text-ink-400 mb-3">启发式是默认值，不是唯一值；换讲法不会重置你的进度。</p>
+
             <div className="space-y-2.5">
-              {guideDepths.map(g => (
+              {teachingModes.map(m => (
                 <button
-                  key={g.key}
-                  onClick={() => switchDepth(g.key)}
+                  key={m.key}
+                  onClick={() => switchDepth(m.key)}
                   className={`w-full rounded-2xl border-2 px-4 py-3 text-left transition ${
-                    depth === g.key ? 'border-brand-400 bg-brand-50' : 'border-ink-100 bg-white active:bg-ink-50'
+                    depth === m.key ? 'border-brand-400 bg-brand-50' : 'border-ink-100 bg-white active:bg-ink-50'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="text-[15px] font-bold text-ink-900">{g.label}</span>
-                    {depth === g.key && <span className="chip bg-brand-500 text-white text-[10.5px]">当前</span>}
+                    <span className="text-[15px] font-bold text-ink-900">{m.label}</span>
+                    {depth === m.key && <span className="chip bg-brand-500 text-white text-[10.5px]">当前</span>}
                   </div>
-                  <p className="text-[12.5px] text-ink-500 leading-relaxed mt-1">{g.desc}</p>
-                  <p className="text-[11.5px] text-ink-400 leading-relaxed mt-1">适合：{g.scene}</p>
+                  <p className="text-[12.5px] text-ink-500 leading-relaxed mt-1">{m.desc}</p>
+                  <p className="text-[11.5px] text-ink-400 leading-relaxed mt-1">适合：{m.scene}</p>
+                  {/* Not for —— 档位之间互相指认边界。学生看到的不是三个孤立选项，
+                      而是三档各自承认「我什么时候不该用」 */}
+                  <p className="text-[11.5px] text-warm-700/85 leading-relaxed mt-1.5 pt-1.5 border-t border-dashed border-ink-100">
+                    这时候别用我：{m.notFor.when} → 换「{m.notFor.useInstead}」
+                  </p>
                 </button>
               ))}
             </div>

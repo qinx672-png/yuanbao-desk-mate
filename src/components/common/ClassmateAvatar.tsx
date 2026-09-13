@@ -23,7 +23,7 @@ interface Props {
   roleId?: string
 }
 
-const MOOD_LABEL: Record<ClassmateMood, string> = {
+export const MOOD_LABEL: Record<ClassmateMood, string> = {
   thinking: '在思考',
   explaining: '在讲解',
   encouraging: '在鼓励',

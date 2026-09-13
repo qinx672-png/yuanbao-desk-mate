@@ -72,6 +72,27 @@ export default function WeakPointsReport({ onOpen }: Props) {
               </p>
             </div>
           )}
+
+          {/*
+            家长看完「哪里弱」，下一个问题一定是「那你们打算怎么办」。
+            这一块回答它——也是题目背景里「持续跟进」四个字落到家长眼里的样子。
+          */}
+          {w.followUp && (
+            <div className="mt-3 rounded-2xl bg-parent-50 border border-parent-100 p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <span className="text-[13.5px] font-bold text-parent-700">接下来怎么跟进</span>
+                <span className="chip bg-white text-parent-600 text-[11px] border border-parent-100 ml-auto shrink-0">
+                  {w.followUp.status}
+                </span>
+              </div>
+              <p className="text-[13px] text-parent-700/90 leading-relaxed">
+                {w.followUp.nextTrigger}
+                {w.followUp.mode === '场景触发'
+                  ? ' —— 不额外占用孩子的时间，复习在他本来就要做的那道题里完成。'
+                  : ' —— 没等到合适时机的题，系统会主动提醒，不需要您盯着。'}
+              </p>
+            </div>
+          )}
         </div>
       ))}
 

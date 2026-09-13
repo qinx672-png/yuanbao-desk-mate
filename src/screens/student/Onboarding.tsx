@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import {
-  onboardSteps,
-  startProbes,
+  onboardInterest,
+  onboardAvatar,
+  quickQuestions,
+  traitUsage,
   profileV0,
   profileTimeline,
   avatarRoles,
   interestContexts,
 } from '@/data/mockData'
-import ClassmateAvatar from '@/components/common/ClassmateAvatar'
-import { SketchFrame, Handwrite } from '@/components/common/SketchFrame'
+import ClassmateAvatarV2 from '@/components/common/ClassmateAvatarV2'
+import { Handwrite } from '@/components/common/SketchFrame'
 import TalkButton from '@/components/common/TalkButton'
 import { useSpeech, useListening, wait } from '@/hooks/useSpeech'
+import type { ProfileTrait } from '@/types'
 import {
   IconShield,
   IconCheck,
@@ -25,7 +28,6 @@ import {
  *
  * 对表《产品定位说明 V2》3.0-2「冷启动：趣味外壳 + 科学内核」：
  * - 学生感受到的是「认识一个新同学」，不是填问卷 —— 全程无量表、无进度条、无「测评」字样
- * - 系统实际采集：兴趣爱好 / 大五人格倾向 / 学习动机；学科起点靠做题看，不靠自评
  * - 大五只用于「过程支持」适配（节奏、反馈、情境），不向学生输出「你是这个人」这类人格定论
  *   （架构判断说明 五 · 能力边界）
  * - 最后一步是角色库自选（3.0-3），换外壳不换内核
@@ -35,53 +37,65 @@ import {
  * 后面再怎么"对话优先"，主轴也是断的 —— 孩子第一眼就认定这是个答题工具。
  * 所以主路径是**同桌出声说，孩子按住说话答**，打字只是兜底。
  *
- * ── 这一版的三件事：把「它在记住我」变成看得见的东西 ─────────
+ * ── 2026-09-12 改版：把「猜你是什么人」换成「快问快答」─────────
  *
- * ① 同桌先猜，你来纠正（GUESSES 表）
- *    第一句不是提问，是同桌瞎猜一个 —— 学生纠正它。从第二句起，
- *    每一次猜测都先说出依据：「因为你刚才说「打篮球」，那我往下猜：…」。
- *    依据是真的（memRef 里存着学生说过的原话），所以猜测会明显变准。
- *    猜中/猜偏都摊开说，还写在小本子上 —— 偏了不藏，这是「容错」那一套的前身。
- *    ⚠️ 这里有一条底线：猜的是**行为和偏好**，不是「你是什么样的人」。
- *    学生随时可以纠正，纠正永远有效。
+ * 旧版做了四轮「同桌猜 → 你纠正 → 我归纳一句」。三处毛病：
  *
- * ② 你说的话，当场变成一道题（SPOT_QUESTIONS + askSpot / pickSpot）
- *    学生说出兴趣 → 同桌立刻把这个兴趣织进一道初中物理题，写在本子上问出来。
- *    第一次体验是「我说的话直接变成了一道题」，而不是「填了个兴趣标签」。
- *    情境句取自 interestContexts（和辅导页的变式题、画像页的素材库同一份），
- *    起点诊断的物理那一半就藏在这道题里 —— 顺手看出来的，不是另外考的。
- *    答完给反馈，但不打分、不盖对错的章：说对了确认他想得对，想偏了换个角度带一遍。
+ * ① 四轮同一个形状。学生做的动作四遍都是「从三个选项里点一个」，第四遍一定腻。
+ * ② 每次猜完还要归纳「你习惯先搭框架」——这已经在给孩子定性了。
+ *    外壳是游戏，里子还是量表。
+ * ③ 学生说完兴趣，下一句就被考题了。这一下教给他的是
+ *    「我说什么，你都会拿来考我」，之后他就不敢说真话了 ——
+ *    而冷启动的全部价值，就在于让他敢说。
  *
- * ③ 旁边有个小本子，一条条累积（notes）
- *    同桌观察到的每一件事都落到本子上，学生全程看得见它长出来。
- *    冷启动结束时，这一页就是首页那本本子的**前一页** —— 不是两份数据，
- *    是同一本本子翻过去：明天打开首页，接着这一页往下写。
+ * 现在改成：
  *
- * ── 一处刻意的例外：做题那两步不给语音 ───────────────────────
+ * ① 同桌硬猜一次（第一步，保留）
+ *    「我手上一条线索都没有，硬猜一个」——这一句是好设计，留。
+ *    学生纠正它 → 采到兴趣 → 喂给出题情境素材库。
+ *
+ * ② 10 道快问快答（QUICK 段）
+ *    一屏一道，两个具体场景挑一个，点完即走。约 40 秒。
+ *    大五五个维度各 2 题，只能定「偏低/中等/偏高」三个粗档 —— 够用了，别装精确。
+ *    10 题里只有 3 题同桌插一句猜测（q1 硬猜 / q4、q8 顺着上一题推）：
+ *    每题都猜会打断节奏，更要紧的是猜了之后学生会往猜的那边靠，采到的东西就不准了。
+ *
+ * ③ 本子上落的是**承诺**，不是评价
+ *    答完之后，本子上多出三行 ——「以后卡住我先不开口，等你说」这种。
+ *    记的是「我打算怎么陪你」，不是「你是什么样的人」。
+ *    孩子看了会觉得被接住，而不是被看穿。这是这一版最要紧的一条。
+ *
+ * ── 为什么冷启动不再出题 ─────────────────────────────────────
+ * 旧版在最后放了两道起点题（一道串联电路、一道一元二次方程）。
+ * 第一次见面就考他，是对关系的透支 —— 而且「我说打篮球」→ 下一句就被考题，
+ * 孩子会学会别说真话。起点诊断挪到**第一次真实辅导**：
+ * 那时候他本来就是带着题来的，顺手看水平，完全不突兀（阶段 1 本就在做诊断）。
+ * 动机同理：问一嘴答的都是场面话，真正准的是看他怎么用产品。
+ * 这两项如实列在画像页的「还没测」里，不假装第一天什么都知道。
+ *
+ * ── 一处刻意的例外：快问快答不给语音 ─────────────────────────
  * 语音适合表达**意图**（"我想练两道题"），不适合表达**判断**（"读数等于电源电压的那只"）。
- * 起点诊断和当场出的那道题都是纸面点选 —— 全语音会把能做的孩子挡在门外。
+ * 10 道快问快答是纸面点选 —— 全语音会把能做的孩子挡在门外。
  * 这不是没做完，是判断：语音优先 ≠ 语音唯一。
  *
  * ── 诚实说明 ───────────────────────────────────────────────
  * 1. 语音合成为浏览器内置能力，找不到中文语音时降级为字幕模式（界面会标出）。
  * 2. 语音识别能用则真、不能用则模拟，模拟结果在本子上如实标注「（原型模拟识别）」。
- * 3. 「说一句话 → 长出贴纸/变成一道题」在原型里是关键词匹配（resolveInterest / matchOption），
- *    不是真 NLU。猜测也是查表（GUESSES），不是模型推的。
- *    真实实现由 LLM 承担：从学生的自然表达里抽取兴趣、动机、表达风格，并现场生成猜测与题目。
+ * 3. 大五粗档在原型里就是数数（每维 2 题，数几个落在高端），不是量表计分。
+ *    真跑由 LLM 结合作答过程（犹豫时长、改选）一起判。
+ * 4. 兴趣靠关键词匹配（resolveInterest），不是真 NLU。
  *
- * 保留的既有安全设计：不出现分数/排名/人格标签、起点题答完不给对错、
+ * 保留的既有安全设计：不出现分数/排名/人格标签、
  * 「这段闲聊不是测评」的常驻声明、形象选择不做付费分层。
  */
 
 type Line =
   | { k: 'ai'; text: string }
   | { k: 'me'; text: string; via?: 'voice' | 'typed'; simulated?: boolean }
-  /** 学生说的那句话，当场变成的一道题 —— 写在本子上，纸面点选（见本文件顶部 ②） */
-  | { k: 'spot'; q: SpotQuestion; picked: number | null }
 
 /** 同桌记住的一件事。学生说过的原话存这儿，「因为你刚才说…」就是从这儿拼出来的 */
 interface Memory {
-  /** 本子上的简写（打篮球），用来拼依据那句话 */
+  /** 本子上的简写（打篮球） */
   short: string
   /** 学生说的原话（我周末打篮球） */
   text: string
@@ -91,29 +105,11 @@ interface Memory {
 
 /** 小本子上的一行 */
 interface Note {
-  /** 猜＝同桌的猜测；题＝当场出的那道题；观察＝学生这一句里看见的事 */
-  kind: '猜' | '题' | '观察'
+  /** 猜＝同桌的猜测；观察＝学生这一句里看见的事；承诺＝同桌往后打算怎么陪 */
+  kind: '猜' | '观察' | '承诺'
   text: string
   /** 只对「猜」有意义：这一猜中没中 —— 这是**同桌自己的成绩**，不是学生的分 */
   hit?: boolean
-}
-
-/** 当场出的那道题（原型：四个兴趣各一道，写死在下面；真跑由 LLM 现场生成） */
-interface SpotQuestion {
-  id: string
-  tag: string
-  /** 情境句，直接取自 interestContexts —— 和辅导页、画像页共用一份素材 */
-  scene: string
-  question: string
-  choices: string[]
-  answerIndex: number
-  /** 答到点子上怎么接（确认他想得对，不盖章、不给分） */
-  right: string
-  /** 想偏了怎么递台阶（也不判错，换个角度再走一遍） */
-  off: string
-  /** 小本子上记的那一行 */
-  noteHit: string
-  noteOff: string
 }
 
 interface Props {
@@ -122,79 +118,24 @@ interface Props {
   onDone: () => void
 }
 
-/** 同桌对每个选择的反应，按选项下标取 */
-const REACTIONS: Record<string, string[]> = {
-  o2: [
-    '行，你习惯先搭框架。那我按步骤来，每一步给你一个明确的落点，不让你悬着。',
-    '明白，你更愿意把手里那件事做扎实。那我把任务切小一点，一次只给你一件。',
-    '灵活型的。那我不给你排死顺序，往哪儿走你说了算。',
-  ],
-  o3: [
-    '记住了。你卡住的时候我先不打断你，等你抬头我再说话。',
-    '好。那卡太久我会主动说一句「先放着」，不用你开口。',
-    '没关系，这很正常。我不拦你搜，但搜完我会问你一句：刚才是哪一步卡住的。',
-  ],
-  o4: [
-    '那最好。我会多问你「为什么」，把原理讲透，不塞给你结论。',
-    '实在。那我们把目标定清楚：考的题型优先，不绕远路，也不多留作业。',
-    '懂。那说好 —— 学得怎么样我只跟你聊，不会变成打小报告的东西。',
-  ],
-}
+/** 走完一步之后下一步去哪。用显式的 stage，不再用下标硬凑 */
+type Stage = 'interest' | 'quick' | 'avatar'
 
-/**
- * 同桌的猜测表 —— 这一屏最要紧的一张表（见本文件顶部 ①）。
- *
- * pick  = 猜学生选第几个。**下标必须和 mockData 里那一步 options 的顺序对上**，改一边要改两边。
- * short = 写在小本子上的简写；嘴上说的是 mockData 里的 ask，两者讲的是同一个猜测。
- * why   = 猜之前先摆依据。第一步没有依据（老实说「硬猜」），
- *         从第二步起依据就是学生上一句的原话 —— 「它在记住我」是这么被看见的。
- *
- * 「越猜越准」是怎么做出来的：
- * 第 1 猜是 4 选 1 的硬猜；后面三猜都押在多数人会选的那一项上（自己那份 / 先跳过 / 考试要考），
- * 同时把依据一句一句摆出来。所以命中率确实比第一句高，学生也看得见为什么高。
- * 这不是把学生往框里塞 —— 猜错了当场认账，纠正永远有效，本子上还留着「猜偏」两个字。
- *
- * 原型里这张表是写死的。真跑由 LLM 依据已有画像和这段对话现场生成猜测，
- * 依据也由它组织成话 —— 但「先说依据再猜」这个形式不能省，省了就退化成查户口。
- */
-const GUESSES: Record<string, { pick: number; short: string; why: (m: Memory[]) => string }> = {
-  o1: {
-    pick: 3,
-    short: '你在家躺着刷手机',
-    why: () => '先不问你，我先猜 —— 我手上一条线索都没有，硬猜一个：',
-  },
-  o2: {
-    pick: 1,
-    short: '你做自己那份就行',
-    // 第一句引用学生**原话**（听起来最像「我在听你说话」），后面几句用简写，不然一句话拖太长
-    why: m => `因为你刚才说「${m[0]?.text ?? '你周末有事干'}」，那我往下猜：`,
-  },
-  o3: {
-    pick: 1,
-    short: '你先跳过、回头再看',
-    why: m =>
-      `你说你「${m[0]?.short ?? '有事干'}」，又是「${m[1]?.short ?? '自己做自己那份'}」的那种 —— 两句放一起，我猜：`,
-  },
-  o4: {
-    pick: 1,
-    short: '你为了考试才学',
-    why: m => `「${m.map(x => x.short).join('」「')}」—— 三句我都记着，这次我押一个：`,
-  },
-}
-
-/** 每一步在小本子上落成哪一行观察 */
-const NOTE_LABEL: Record<string, string> = {
-  o1: '周末',
-  o2: '小组作业',
-  o3: '卡住十分钟',
-  o4: '学数理',
-}
-
-/** 猜中 / 猜偏怎么交代。第一句是瞎猜的，后面几句是按学生说过的话推的，说法要分开 */
 const VERDICT_HIT_FIRST = '哟，头一句就蒙对了 —— 不过这回是运气，我手上一点线索都没有。'
 const VERDICT_MISS_FIRST = '猜偏了，正常，我手上一条线索都没有。你纠正我这一句，比我自己猜十次都管用。'
-const VERDICT_HIT = '猜中了。你发现没有 —— 我这几句比第一句准了，因为你把该说的都说了。'
-const VERDICT_MISS = '又偏了。没事，你纠正一句，我就少猜一次。'
+
+/** 猜中 / 猜偏在快问快答里的说法：一句话，不归纳、不评价人格 */
+const QUICK_HIT = '中了。'
+const QUICK_MISS = '又偏了，你选你的。'
+
+/**
+ * 本子上最后落哪三句承诺。
+ *
+ * 挑的是最能用起来的三维：尽责性（任务切多细）、开放性（给几种讲法）、
+ * 情绪稳定性（什么时候递台阶）。外向性和宜人性也测了，进画像页，但不占本子 ——
+ * 十行承诺会把本子变成说明书，孩子就不看了。
+ */
+const PLEDGE_PICK = ['q3', 'q5', 'q9']
 
 /** 兴趣关键词兜底：学生说「在家躺着」时，也要能落到「休息」这个情境上 */
 const INTEREST_WORDS: { tag: string; words: string[] }[] = [
@@ -203,54 +144,6 @@ const INTEREST_WORDS: { tag: string; words: string[] }[] = [
   { tag: '动漫', words: ['动漫', '动画', '漫画', '画画'] },
   { tag: '休息', words: ['休息', '躺着', '睡觉', '宅', '刷手机', '发呆'] },
 ]
-
-/**
- * 当场出的那几道题（见本文件顶部 ②）。
- *
- * 四道题考的是同一个知识点的四个侧面，不是同一道题换四个壳：
- * 篮球 → 判断故障类型；游戏 → 用电压表找断点；动漫 → 开关装在哪儿；
- * 休息 → 多串一个用电器会怎样。
- * 难度都压在「串联只有一条路」这一条上 —— 这是产品主线（串联电路故障分析）的起点，
- * 也是后面起点题、辅导页的入口。
- */
-const SPOT_QUESTIONS: Record<string, Omit<SpotQuestion, 'id' | 'tag' | 'scene'>> = {
-  篮球: {
-    question: '那排灯是一根线串起来的。校队打到一半，整排灯忽然全灭了 —— 你觉得最可能是怎么回事？',
-    choices: ['线路上有一处断开了', '其中一只灯泡烧了，其他几只还会亮', '灯用久了，会一起慢慢变暗'],
-    answerIndex: 0,
-    right: '对 —— 只有一条路，任何一处断，整排都不通。这句是你自己想出来的，我只帮你确认了一下。',
-    off: '这个想法很常见。不过你再看一眼：它们只有一条路可走 —— 一只坏了，那条路就断了，所以整排一起灭。这就是串联。',
-    noteHit: '记分牌那道：他一口说出「线路上有一处断了」',
-    noteOff: '记分牌那道：他先想到「灯泡烧了」——下次从「只有一条路」讲起',
-  },
-  游戏: {
-    question: '那排指示灯也是一根线串起来的。整排都不亮了，你手上只有一个电压表 —— 测到哪一只的时候，读数会等于电源电压？',
-    choices: ['断开的那一只', '完好的那一只', '电阻最大的那一只'],
-    answerIndex: 0,
-    right: '对，就是断掉的那只 —— 电压表「隔着」它，量到的其实是电源两端的电压。这一招用来找断点特别好使。',
-    off: '换个角度记：完好的那只，电流顺顺当当通过了，它两端几乎没有电压差；断掉的地方，电压才全落在它身上。所以读数等于电源电压的那只，才是断的。',
-    noteHit: '手柄灯那题：他说读数在断开的那只上',
-    noteOff: '手柄灯那题：电压表和断点的关系，我换了个角度讲了一遍',
-  },
-  动漫: {
-    question: '这串装饰灯的开关，装在整串灯的最末端（离电源最远的那一头）。它还能一次关掉整串灯吗？',
-    choices: ['能，开关装在哪儿都一样', '不能，必须装在电源正极那一头', '只能关掉它后面那几盏'],
-    answerIndex: 0,
-    right: '对。串联只有一条路，开关掐在哪一段，掐的都是同一条路 —— 装在哪儿都一样。',
-    off: '跟着那条路走一遍：电流从电源出来，一盏一盏经过，再回到电源。开关装在末端，掐的还是同一条路 —— 所以整串一起灭。',
-    noteHit: '手办柜灯串：他说开关装哪儿都能关整串',
-    noteOff: '手办柜灯串：开关位置那道，我们沿着同一条路走了一遍',
-  },
-  休息: {
-    question: '这串小夜灯是串联的，你想再串一盏进去，凑够五盏 —— 串进去之后，原来那几盏会怎样？',
-    choices: ['比原来暗一点', '比原来亮一点', '一点不变'],
-    answerIndex: 0,
-    right: '对。多了一盏要分电压，每盏分到的就少了，所以暗一点 —— 串联里谁也别想多占。',
-    off: '多串一盏，等于这条路上又多了一个分电压的 —— 每盏分到的少了，自然暗一点。要是各走各的路（并联），那才会互不影响。',
-    noteHit: '小夜灯那道：他说再串一盏会「暗一点」',
-    noteOff: '小夜灯那道：串联里多一个用电器会怎样，我们捋了一遍',
-  },
-}
 
 /**
  * 字面重合度：原型里用这个判断学生说的是哪一句（真跑由 LLM 做）。
@@ -269,15 +162,6 @@ function matchBest(text: string, options: { label: string }[]): { i: number; sco
     }
   })
   return { i: bi, score: bs }
-}
-
-/**
- * 把学生说的一句话，对上他说的是哪一张纸条。
- * 对不上就落在第一张 —— 宁可保守，也不要猜错孩子说了什么。
- */
-function matchOption(text: string, options: { label: string }[]): number {
-  const r = matchBest(text, options)
-  return r.score >= 0.34 ? r.i : 0
 }
 
 /**
@@ -302,19 +186,6 @@ function resolveInterest(
   return { i: null, tag: null, echo: text.trim() }
 }
 
-/** 情境句：学生说一句话 → 接到一个具体的出题情境上（和辅导页共用 interestContexts） */
-function sceneFor(tag: string | null): string | null {
-  return tag ? (interestContexts[tag] ?? null) : null
-}
-
-/** 拼出当场要出的那道题；这个兴趣没有现成的题就返回 null（不硬编一道来凑） */
-function spotFor(tag: string | null): SpotQuestion | null {
-  const scene = sceneFor(tag)
-  const q = tag ? SPOT_QUESTIONS[tag] : undefined
-  if (!tag || !scene || !q) return null
-  return { id: tag, tag, scene, ...q }
-}
-
 /**
  * 本子上记的简写：把「我周末打篮球」缩成「打篮球」。
  * 原型里就这一条去掉句首「我…」的土办法，真跑由 LLM 归纳。
@@ -324,18 +195,45 @@ function shortOf(text: string, max = 12): string {
   return t.length > max ? `${t.slice(0, max)}…` : t
 }
 
+/**
+ * 把 10 个答案数成大五五个粗档。
+ *
+ * 每维只有 2 题，所以只可能是 0 / 1 / 2 个落在高端 —— **别包装成精确分数**。
+ * 这一节故意写得这么朴素：原型里它就是数数，真跑由 LLM 结合作答过程一起判。
+ * 写死一份「中等偏上」的假画像，会让下面那页科学内核变成摆设。
+ */
+function tallyTraits(answers: (0 | 1)[]): ProfileTrait[] {
+  const dims = ['外向性', '尽责性', '开放性', '宜人性', '情绪稳定性']
+  return dims.map(name => {
+    let high = 0
+    quickQuestions.forEach((q, i) => {
+      if (q.dimension === name && answers[i] === q.high) high++
+    })
+    return {
+      name,
+      level: high === 0 ? '偏低' : high === 1 ? '中等' : '偏高',
+      usedFor: traitUsage[name] ?? '',
+    }
+  })
+}
+
 export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
   const [lines, setLines] = useState<Line[]>([])
-  /** onboardSteps 的下标：0-3 同桌先猜，4 起点题，5 选形象 */
-  const [stepIdx, setStepIdx] = useState(0)
-  const [probeIdx, setProbeIdx] = useState(0)
+  const [stage, setStage] = useState<Stage>('interest')
+  /** 当前问到第几道快问快答 */
+  const [qi, setQi] = useState(0)
+  /** 每道快问快答选了哪个（下标 = quickQuestions 的下标） */
+  const [answers, setAnswers] = useState<(0 | 1)[]>([])
+  /** 刚点过的那个选项，用来做一个短促的「按下去」反馈 */
+  const [picked, setPicked] = useState<0 | 1 | null>(null)
   const [phase, setPhase] = useState<'busy' | 'waiting'>('busy')
-  const [thinking, setThinking] = useState<string | null>(null)
   const [showCore, setShowCore] = useState(true)
   const [showProfile, setShowProfile] = useState(false)
   /** 小本子上已经落下的行 —— 冷启动结束时，它就是首页那本的前一页 */
   const [notes, setNotes] = useState<Note[]>([])
   const [noteOpen, setNoteOpen] = useState(false)
+  /** 同桌在这一题猜了第几个；没猜就是 null */
+  const [guessPick, setGuessPick] = useState<0 | 1 | null>(null)
 
   const { speak, stop, muted, setMuted, ttsReady } = useSpeech()
   const { listen } = useListening()
@@ -349,14 +247,15 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
    * 「因为你刚才说…」是在异步流程里拼的，state 会读到旧值。
    */
   const memRef = useRef<Memory[]>([])
-  /** 这一步猜的是第几个选项；同样要在异步里读，所以用 ref */
-  const guessRef = useRef<number | null>(null)
-  /** 猜中了几次 —— 收尾时如实说出来，不吹 */
-  const hitRef = useRef(0)
+  /** 答案和猜的一样要异步读，同样用 ref */
+  const answersRef = useRef<(0 | 1)[]>([])
+  const guessRef = useRef<0 | 1 | null>(null)
+  /** 兴趣：第一步采到的 tag，交给画像页 */
+  const [interest, setInterest] = useState<string | null>(null)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
-  }, [lines, thinking])
+  }, [lines, qi, picked, stage])
 
   useEffect(() => {
     if (booted.current) return
@@ -386,45 +285,18 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
   /** 本子上落一行 */
   const addNote = (n: Note) => setNotes(l => [...l, n])
 
-  /** 开场：同桌先开口，然后直接抛第一个猜测（不是第一个问题） */
+  /** 开场：同桌先开口，然后硬猜第一个（不是第一个问题） */
   const intro = async () => {
     const id = ++runRef.current
     await say('嗨，我是你的新同桌。开学第一天，这本本子还是空的 —— 以后你和我都写在这儿。', id)
-    await askGuess(0, id)
-  }
-
-  /**
-   * ① 同桌先猜：先摆依据，再说猜测，然后等学生纠正。
-   * 第 1~4 步都走这儿；第 5 步（起点题）和第 6 步（选形象）才是真在问。
-   */
-  const askGuess = async (i: number, id: number) => {
-    const s = onboardSteps[i]
-    const g = s ? GUESSES[s.id] : undefined
-    if (!s || !g) return
-    setStepIdx(i)
-    guessRef.current = g.pick
-    await say(`${g.why(memRef.current)}${s.ask}`, id)
+    await say(`先不问你，我先猜 —— ${onboardInterest.ask}`, id)
     if (!alive(id)) return
     setPhase('waiting')
   }
 
-  /** 问下一步（起点题 / 选形象这两步用） */
-  const askStep = async (i: number, id: number) => {
-    setStepIdx(i)
-    const s = onboardSteps[i]
-    if (s) {
-      await say(s.ask, id)
-      if (!alive(id)) return
-      setPhase('waiting')
-    }
-  }
-
-  const step = onboardSteps[stepIdx]
-  const isSlipStep = stepIdx >= 1 && stepIdx <= 3
-
-  /** 第 1 猜（兴趣）：学生纠正 → 本子记两行 → 这句话当场变成一道题（②） */
+  /** 第 1 步：学生纠正同桌 → 本子记两行 → 采到兴趣 */
   const onSayInterest = async (typed?: string) => {
-    if (phase !== 'waiting' || stepIdx !== 0) return
+    if (phase !== 'waiting' || stage !== 'interest') return
     const id = runRef.current
     setPhase('busy')
 
@@ -433,7 +305,7 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
     if (typed !== undefined) {
       text = typed.trim()
     } else {
-      const opts = onboardSteps[0].options ?? [{ label: '猜错了，我打球' }]
+      const opts = onboardInterest.options ?? [{ label: '猜错了，我打球' }]
       const r = await listen(opts[simIdx.current++ % opts.length].label)
       if (!alive(id)) return
       text = r.text.trim()
@@ -446,7 +318,7 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
       return
     }
 
-    const opts = onboardSteps[0].options ?? []
+    const opts = onboardInterest.options ?? []
     const res = resolveInterest(text, opts)
     const said = res.echo
     setLines(l => [
@@ -455,138 +327,130 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
     ])
 
     // 本子上先记同桌这一猜中没中 —— 偏了也照写，不藏
-    const hit = res.i !== null && res.i === guessRef.current
-    if (hit) hitRef.current++
-    addNote({ kind: '猜', text: `猜「${GUESSES.o1.short}」`, hit })
+    const hit = res.i !== null && res.i === 3
+    addNote({ kind: '猜', text: '猜「你在家躺着刷手机」', hit })
     addNote({ kind: '观察', text: `周末：${shortOf(said)}` })
     memRef.current = [...memRef.current, { short: shortOf(said), text: said, tag: res.tag }]
-
-    setThinking('这一句正好能出一道题 —— 我先把情境记下来。')
-    await wait(900)
-    if (!alive(id)) return
-    setThinking(null)
+    if (res.tag) setInterest(res.tag)
 
     await say(hit ? VERDICT_HIT_FIRST : VERDICT_MISS_FIRST, id)
+    await say(
+      res.tag
+        ? `行，「${res.tag}」我记下了 —— 以后出题我就往这上面靠。`
+        : '行，我记下了 —— 以后出题我往你说的这上头靠。',
+      id,
+    )
 
-    // ② 你说的话，当场变成一道题
-    const q = spotFor(res.tag)
-    if (!q) {
-      await say('这句我先记下了 —— 手上还没有现成的题能拿它出，等有了，我第一个拿它给你出。', id)
-      await askGuess(1, id)
-      return
-    }
-    await say('那我现在就用你这句话出一道题 —— 就写在你旁边这本本子上。', id)
-    if (!alive(id)) return
-    setLines(l => [...l, { k: 'spot', q, picked: null }])
-    if (alive(id)) setPhase('waiting')
+    // 进快问快答
+    setStage('quick')
+    await askQuick(0, id)
   }
 
-  /** ② 学生答这道当场出的题：给反馈，但不打分、不盖对错的章 */
-  const pickSpot = async (q: SpotQuestion, i: number) => {
-    if (phase !== 'waiting') return
-    const id = runRef.current
-    setPhase('busy')
-    setLines(l => l.map((x): Line => (x.k === 'spot' && x.q.id === q.id ? { ...x, picked: i } : x)))
-    setLines(l => [...l, { k: 'me', text: q.choices[i] }])
-    await wait(420)
-    if (!alive(id)) return
+  /**
+   * ② 抛出一道快问快答。
+   *
+   * 有 guess 的题，同桌先说一句猜测再让学生答 —— 猜的是「这题你会选哪个」，
+   * 不是「你是什么人」。猜完立刻补一句「你选你的」，把引导性明着卸掉。
+   */
+  const askQuick = async (i: number, id: number) => {
+    const q = quickQuestions[i]
+    if (!q) return
+    setQi(i)
+    setPicked(null)
+    guessRef.current = null
+    setGuessPick(null)
 
-    const ok = i === q.answerIndex
-    addNote({ kind: '题', text: ok ? q.noteHit : q.noteOff })
-    await say(ok ? q.right : q.off, id)
-    await askGuess(1, id)
-  }
+    if (q.guess) {
+      const g = q.guess
+      // 'echo' = 跟上一题选同一个下标。同维度相邻两题用它 —— 这是同桌真的在往下推
+      const pick: 0 | 1 =
+        g.pick === 'echo'
+          ? ((answersRef.current[i - 1] ?? 0) as 0 | 1)
+          : g.pick
 
-  /** 第 2-4 猜：学生纠正 → 同桌认账 → 本子记两行 → 下一步 */
-  const onSaySlip = async (typed?: string) => {
-    if (phase !== 'waiting' || !isSlipStep) return
-    const id = runRef.current
-    setPhase('busy')
-
-    const opts = step.options ?? []
-    if (!opts.length) return
-
-    let text: string
-    let simulated = false
-    if (typed !== undefined) {
-      text = typed.trim()
-    } else {
-      const r = await listen(opts[simIdx.current++ % opts.length].label)
+      let line: string
+      if (g.blind) {
+        line = `第 ${i + 1} 题。我手上还是一点线索都没有，硬猜一个 —— 我猜你选「${q.choices[pick]}」。你选你的，别管我。`
+      } else {
+        const last = quickQuestions[i - 1]
+        const lastPick = answersRef.current[i - 1]
+        const lastText = last && lastPick !== undefined ? `「${last.choices[lastPick]}」` : '你上一题那个选法'
+        line = `你上一题选的是${lastText} —— 同一类事，我往下猜：这题你还是「${q.choices[pick]}」。`
+      }
+      guessRef.current = pick
+      setGuessPick(pick)
+      await say(line, id)
       if (!alive(id)) return
-      text = r.text.trim()
-      simulated = !r.real
     }
 
-    if (!text) {
-      await say('没听清，你再说一遍？', id)
-      if (alive(id)) setPhase('waiting')
-      return
-    }
-
-    // 原样点了某张纸条就直接对上；否则按字面重合度猜（真跑由 LLM 做）
-    const exact = opts.findIndex(o => o.label === text)
-    const i = exact >= 0 ? exact : matchOption(text, opts)
-    const echo = (opts[i] as { echo?: string }).echo
-    const said = echo ?? text
-    setLines(l => [
-      ...l,
-      { k: 'me', text: said, via: typed === undefined ? 'voice' : 'typed', simulated },
-    ])
-
-    // 猜中没中照样摊开说；本子上再记一行「这一句里看见了什么」
-    const g = GUESSES[step.id]
-    const hit = i === guessRef.current
-    if (hit) hitRef.current++
-    addNote({ kind: '猜', text: `猜「${g.short}」`, hit })
-    const label = NOTE_LABEL[step.id] ?? '这一句'
-    const short = shortOf(said)
-    // 学生那句话本身就带上了类别（「小组作业我来安排」）就别再加前缀，省得本子上读起来像复读
-    addNote({ kind: '观察', text: short.startsWith(label) ? short : `${label}：${short}` })
-    memRef.current = [...memRef.current, { short: shortOf(said), text: said, tag: null }]
-
-    await say(hit ? (stepIdx === 1 ? VERDICT_HIT_FIRST : VERDICT_HIT) : stepIdx === 1 ? VERDICT_MISS_FIRST : VERDICT_MISS, id)
-    await say(REACTIONS[step.id]?.[i] ?? '记下了。', id)
-
-    // 四句猜完，把「它越猜越准」这件事用事实说出来 —— 不是夸，是把机制摊给学生看
-    if (stepIdx === 3) {
-      await say(
-        hitRef.current >= 2
-          ? `刚才我猜了 4 次，中了 ${hitRef.current} 次。头一句是硬猜的，后面几句是拿你说过的话推的 —— 这本子越厚，我猜得越准。`
-          : `刚才我猜了 4 次，只中了 ${hitRef.current} 次。不过你每纠正我一句，这本子就多一行 —— 下一句我就能少猜一次。`,
-        id,
-      )
-    }
-
-    const next = stepIdx + 1
-    if (next <= 3) await askGuess(next, id)
-    else await askStep(next, id)
+    setPhase('waiting')
   }
 
-  /** 起点题：答完不给对错、不打分 —— 这一步只用来定起点。刻意保留纸面点选，不走语音。 */
-  const pickProbe = async (i: number) => {
-    if (phase !== 'waiting') return
+  /** ② 学生点了一个选项：记答案 → 该猜的判一下 → 下一题 */
+  const pickQuick = async (choice: 0 | 1) => {
+    if (phase !== 'waiting' || stage !== 'quick') return
     const id = runRef.current
     setPhase('busy')
-    const p = startProbes[probeIdx]
-    setLines(l => [...l, { k: 'me', text: p.choices[i] }])
-    await wait(520)
-    if (!alive(id)) return
+    setPicked(choice)
 
-    if (probeIdx < startProbes.length - 1) {
-      setProbeIdx(x => x + 1)
-      setPhase('waiting')
+    const q = quickQuestions[qi]
+    const next = [...answersRef.current]
+    next[qi] = choice
+    answersRef.current = next
+    setAnswers(next)
+
+    // 有猜就当场交代一句 —— 一句话，不归纳、不评价人格
+    if (guessRef.current !== null) {
+      const hit = choice === guessRef.current
+      addNote({ kind: '猜', text: `猜「${q.choices[guessRef.current]}」`, hit })
+      await say(hit ? QUICK_HIT : QUICK_MISS, id)
+      if (!alive(id)) return
+    }
+
+    if (qi < quickQuestions.length - 1) {
+      // 没猜的题不留停顿：点完就走，这是「不烦」的关键
+      if (guessRef.current === null) await wait(240)
+      await askQuick(qi + 1, id)
       return
     }
-    addNote({ kind: '观察', text: '两道起点题做完了 —— 我没记对错' })
-    await say('行，我心里有数了 —— 你从哪儿开始，我知道该往哪儿使劲了。', id)
-    await askStep(5, id)
+
+    await wrap(id)
   }
 
-  if (showProfile) return <ProfilePage roleId={roleId} notes={notes} onDone={onDone} />
+  /** ③ 收尾：把三句承诺落到本子上，然后进选形象 */
+  const wrap = async (id: number) => {
+    await say('十道题答完了。我一条都没打分 —— 它们只告诉我一件事：以后该用什么方式陪你。', id)
+    await say('其中三句我写在你本子上了，你看看。', id)
+    if (!alive(id)) return
+
+    PLEDGE_PICK.forEach(qid => {
+      const idx = quickQuestions.findIndex(x => x.id === qid)
+      const q = quickQuestions[idx]
+      const a = answersRef.current[idx]
+      if (q && a !== undefined) addNote({ kind: '承诺', text: q.pledge[a] })
+    })
+
+    setStage('avatar')
+    await say(onboardAvatar.ask, id)
+    if (!alive(id)) return
+    setPhase('waiting')
+  }
+
+  if (showProfile) {
+    return (
+      <ProfilePage
+        roleId={roleId}
+        notes={notes}
+        answers={answers}
+        interest={interest}
+        onDone={onDone}
+      />
+    )
+  }
 
   const firstAi = lines.findIndex(l => l.k === 'ai')
-  /** 当场出的题还等着答：这时候麦克风先收起来，让学生在本子上点 */
-  const spotPending = lines.some(l => l.k === 'spot' && l.picked === null)
+  const q = quickQuestions[qi]
+  const remain = quickQuestions.length - qi
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-[#f4f7fb]">
@@ -615,13 +479,14 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
 
       {/* 同桌身份条：和首页同一套 */}
       <div className="shrink-0 bg-gradient-to-b from-white to-[#eaf2fb] px-4 pt-1.5 pb-2 border-b border-ink-100/70 flex items-center gap-2.5">
-        <ClassmateAvatar mood={thinking ? 'thinking' : phase === 'busy' ? 'explaining' : 'listening'} size={38} roleId={roleId} />
+        {/* 同首页：38px 用 A 版，状态由右侧文字承担 */}
+        <ClassmateAvatarV2 mood={phase === 'busy' ? 'explaining' : 'listening'} size={38} roleId={roleId} variant="A" />
         <span className="text-[14px] font-bold text-ink-900">你的同桌</span>
         <span className="chip bg-brand-50 text-brand-700 text-[10.5px]">
           {avatarRoles.find(r => r.id === roleId)?.name}
         </span>
         <span className="ml-auto text-[11.5px] text-ink-400 truncate">
-          {thinking ? '正在记…' : phase === 'busy' ? '正在说…' : '第一次见面'}
+          {phase === 'busy' ? '正在说…' : '第一次见面'}
         </span>
       </div>
 
@@ -644,78 +509,51 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
 
           <div className="relative pl-9 pr-4 py-3.5 space-y-3.5">
             {lines.map((l, i) => (
-              <PageLine
-                key={i}
-                line={l}
-                first={i === firstAi}
-                pickable={phase === 'waiting'}
-                onPickSpot={pickSpot}
-              />
+              <PageLine key={i} line={l} first={i === firstAi} />
             ))}
 
-            {thinking && (
-              <div className="animate-fadeUp">
-                <div className="flex items-center gap-1 text-[10.5px] text-warm-700 font-semibold mb-1">
-                  <IconSpark className="w-3 h-3" />
-                  同桌想了一下
-                </div>
-                <div className="text-[13px] leading-[1.85] text-ink-500 italic">{thinking}</div>
-              </div>
+            {/* 科学内核标注：原型可视化，产品内不展示 */}
+            {showCore && phase === 'waiting' && (
+              <CoreNote
+                text={
+                  stage === 'quick' && q
+                    ? `大五 · ${q.dimension} → ${traitUsage[q.dimension] ?? ''}（第 ${qi + 1} / ${quickQuestions.length} 题）`
+                    : stage === 'interest'
+                      ? onboardInterest.measures
+                      : onboardAvatar.measures
+                }
+              />
             )}
 
-            {/* 科学内核标注：原型可视化，产品内不展示 */}
-            {showCore && step?.measures && phase === 'waiting' && <CoreNote text={step.measures} />}
-
-            {/* ── 第 1-4 猜：说 / 点 / 写三条等价通道 ─────────────
-                纸条收进面板里了：默认屏幕上只有一个麦克风，"谈到什么才出现什么"没破。
-                当场出的那道题等着答的时候，麦克风先收起来 —— 那一步在本子上点。 */}
-            {stepIdx <= 3 && (
+            {/* ── 第 1 步：兴趣。说 / 点 / 写三条等价通道 ────────── */}
+            {stage === 'interest' && (
               <div className="pt-3 border-t border-dashed border-ink-200/80">
                 <TalkButton
-                  onSay={stepIdx === 0 ? onSayInterest : onSaySlip}
-                  disabled={phase !== 'waiting' || spotPending}
-                  hint={spotPending ? '这道题在本子上点一下就行' : '按住说话'}
-                  suggestions={
-                    stepIdx === 0
-                      ? (onboardSteps[0].options ?? []).map(o => o.label)
-                      : (step.options ?? []).map(o => o.label)
-                  }
+                  onSay={onSayInterest}
+                  disabled={phase !== 'waiting'}
+                  hint="按住说话"
+                  suggestions={(onboardInterest.options ?? []).map(o => o.label)}
                 />
               </div>
             )}
 
-            {/* ── 起点题：题目写在本子上，答完不给对错 ───────────
-                这一步刻意不用语音：语音适合表达意图，不适合表达判断。 */}
-            {stepIdx === 4 && (
-              <div className="pt-1">
-                <SketchFrame stroke="#8ecdff" fill="#f7fbff" rotate="-rotate-[.6deg]">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="chip bg-white text-brand-700 text-[11px] border border-brand-100">
-                      {startProbes[probeIdx].subject}
-                    </span>
-                    <span className="text-[11.5px] text-ink-400">
-                      第 {probeIdx + 1} / {startProbes.length} 道
-                    </span>
-                  </div>
-                  <p className="text-[14px] text-ink-900 leading-[1.85]">{startProbes[probeIdx].question}</p>
-                </SketchFrame>
-                {phase === 'waiting' && (
-                  <>
-                    <Slips
-                      items={startProbes[probeIdx].choices.map(c => ({ label: c }))}
-                      onPick={(_l, _e, i) => pickProbe(i)}
-                      hint="这道题点一下就行，不用念出来 ——"
-                    />
-                    <p className="text-[11.5px] text-ink-400 mt-1.5">
-                      答完不给对错、不打分 —— 这一步只用来定起点。
-                    </p>
-                  </>
-                )}
-              </div>
+            {/* ── ② 快问快答：一屏一道，点完即走 ─────────────────
+                刻意不用语音：语音适合表达意图，不适合表达判断。 */}
+            {stage === 'quick' && q && (
+              <QuickCard
+                key={q.id}
+                scene={q.scene}
+                choices={q.choices}
+                remain={remain}
+                picked={picked}
+                pickable={phase === 'waiting'}
+                guessPick={guessPick}
+                onPick={pickQuick}
+              />
             )}
 
             {/* ── 选形象：8 张贴纸，换外壳不换内核 ─────────────── */}
-            {stepIdx === 5 && (
+            {stage === 'avatar' && (
               <div className="pt-1">
                 <div className="grid grid-cols-4 gap-2">
                   {avatarRoles.map(r => (
@@ -729,7 +567,8 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
                         roleId === r.id ? 'border-brand-500 bg-brand-50' : 'border-ink-100 bg-white'
                       }`}
                     >
-                      <ClassmateAvatar mood="listening" size={40} roleId={r.id} />
+                      {/* 角色选择：8 个并排，加符号会互相打架，用 A 版展示「长相」就够了 */}
+                      <ClassmateAvatarV2 mood="listening" size={40} roleId={r.id} variant="A" />
                       <span className="text-[11.5px] font-semibold text-ink-800">{r.name}</span>
                       <span className="text-[10px] text-ink-400 leading-tight">{r.style}</span>
                     </button>
@@ -762,11 +601,75 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
 }
 
 /**
+ * ② 快问快答的一张卡（见本文件顶部 ②）
+ *
+ * 一屏一道：场景句 + 两张纸条，点完即走。
+ * 「还剩 N 题」是刻意留的 —— 孩子不知道还有多久才会烦；
+ * 知道终点在哪，等待才不显得长。这不是进度条：它不评价、不累积分数。
+ */
+function QuickCard({
+  scene,
+  choices,
+  remain,
+  picked,
+  pickable,
+  guessPick,
+  onPick,
+}: {
+  scene: string
+  choices: [string, string]
+  remain: number
+  picked: 0 | 1 | null
+  pickable: boolean
+  guessPick: 0 | 1 | null
+  onPick: (i: 0 | 1) => void
+}) {
+  return (
+    <div className="pt-1 animate-fadeUp">
+      <div className="rounded-2xl border border-brand-100 bg-[#fbfdff] px-3 py-3">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="chip bg-white text-brand-700 text-[10.5px] border border-brand-100">快问快答</span>
+          <span className="ml-auto text-[11px] text-ink-400">还剩 {remain} 题</span>
+        </div>
+
+        <p className="text-[14.5px] text-ink-900 leading-[1.85]">{scene}</p>
+
+        <div className="mt-2.5 space-y-2">
+          {choices.map((c, i) => {
+            const idx = i as 0 | 1
+            const isPicked = picked === idx
+            const wasGuessed = guessPick === idx
+            return (
+              <button
+                key={c}
+                onClick={() => pickable && onPick(idx)}
+                disabled={!pickable}
+                className={`tap w-full text-left rounded-xl border border-dashed px-3.5 py-3 text-[14px] leading-[1.6] transition ${
+                  isPicked
+                    ? 'border-brand-400 bg-brand-50 text-brand-700 font-semibold'
+                    : 'border-ink-200 bg-[#fffdf5] text-ink-700 hover:border-brand-300 hover:text-brand-700'
+                } ${pickable ? '' : 'opacity-70'}`}
+              >
+                {c}
+                {/* 同桌猜过这个 —— 标出来，让学生知道它猜的是哪个（猜中猜偏都不影响选） */}
+                {wasGuessed && !isPicked && (
+                  <span className="ml-1.5 text-[11px] text-ink-400">（同桌猜的这个）</span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/**
  * 同桌的小本子（见本文件顶部 ③）
  *
  * 它一直挂在本子上面，一行一行往上长：同桌观察到的每一件事都写在这儿，
  * 学生不用等总结，当场就能看见「它记住了什么」。
- * 折起来只露最后一行（写满一页的感觉还在），点一下摊开看全部。
+ * 折起来只露最后两行（写满一页的感觉还在），点一下摊开看全部。
  * 「写了 N 行」数的是本子，不是学生的成绩 —— 这里没有进度、没有评分。
  */
 function LittleNotebook({
@@ -778,8 +681,7 @@ function LittleNotebook({
   open: boolean
   onToggle: () => void
 }) {
-  /* 折起来露最后两行（一步落两行，刚好看得见「猜中/猜偏」和它看见的那件事）；
-     下标一起带着当 key 用 —— 同一句话可能出现两次 */
+  /* 折起来露最后两行（刚好看得见最新的动静），下标一起带着当 key 用 —— 同一句话可能出现两次 */
   const shown = open
     ? notes.map((n, i) => ({ n, i }))
     : notes.slice(-2).map((n, i) => ({ n, i: notes.length - 2 + i }))
@@ -818,8 +720,8 @@ function NoteLine({ n }: { n: Note }) {
   const tagClass =
     n.kind === '猜'
       ? 'bg-brand-50 text-brand-700'
-      : n.kind === '题'
-        ? 'bg-warm-50 text-warm-700'
+      : n.kind === '承诺'
+        ? 'bg-cheer-50 text-cheer-700'
         : 'bg-ink-100 text-ink-500'
   return (
     <div className="animate-fadeUp flex items-start gap-1.5">
@@ -839,49 +741,8 @@ function NoteLine({ n }: { n: Note }) {
   )
 }
 
-/** 同桌推过来的纸条：纸上的选项，不是控件。选一张，纸就变成「你说的」那行字。 */
-function Slips({
-  items,
-  onPick,
-  hint,
-}: {
-  items: { label: string; echo?: string }[]
-  onPick: (label: string, echo: string | undefined, i: number) => void
-  hint: string
-}) {
-  return (
-    <div className="pt-2.5">
-      {hint && <div className="text-[11px] text-ink-400 mb-1.5">{hint}</div>}
-      <div className="flex flex-wrap gap-1.5">
-        {items.map((o, i) => (
-          <button
-            key={o.label}
-            onClick={() => onPick(o.label, o.echo, i)}
-            className={`tap rounded-lg border border-dashed border-ink-200 bg-[#fffdf5] px-3 text-[13px] text-ink-700 hover:border-brand-300 hover:text-brand-700 transition ${
-              i % 2 ? 'rotate-[.7deg]' : '-rotate-[.9deg]'
-            }`}
-          >
-            {o.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  )
-}
-
 /** 本子里的一行 */
-function PageLine({
-  line,
-  first,
-  pickable,
-  onPickSpot,
-}: {
-  line: Line
-  first: boolean
-  /** 现在能不能点（同桌正在说话的时候不能点） */
-  pickable: boolean
-  onPickSpot: (q: SpotQuestion, i: number) => void
-}) {
+function PageLine({ line, first }: { line: Line; first: boolean }) {
   if (line.k === 'me') {
     return (
       <div className="animate-fadeUp">
@@ -897,41 +758,6 @@ function PageLine({
         >
           <Handwrite text={line.text} total={900} />
         </div>
-      </div>
-    )
-  }
-
-  /* ② 你说的那句话，变成的一道题：情境句 + 题干 + 纸条选项 */
-  if (line.k === 'spot') {
-    const q = line.q
-    return (
-      <div className="pt-1">
-        <SketchFrame stroke="#8ecdff" fill="#f7fbff" rotate="-rotate-[.6deg]">
-          <div className="flex items-center gap-2 mb-1.5">
-            <span className="chip bg-white text-brand-700 text-[10.5px] border border-brand-100">
-              从你说的「{q.tag}」出的
-            </span>
-            <span className="text-[11.5px] text-ink-400">物理</span>
-          </div>
-          {/* 情境句用的是 interestContexts 里那一句 —— 和辅导页、画像页同一份素材 */}
-          <div className="text-[12.5px] text-ink-500 leading-relaxed">{q.scene}。</div>
-          <p className="text-[14px] text-ink-900 leading-[1.85] mt-1">{q.question}</p>
-          <div className="text-[11px] text-ink-400 mt-2 pt-2 border-t border-dashed border-ink-200/70">
-            以后你遇到的物理题，我尽量都往这儿靠。
-          </div>
-        </SketchFrame>
-
-        {line.picked === null && pickable ? (
-          <Slips
-            items={q.choices.map(c => ({ label: c }))}
-            onPick={(_l, _e, i) => onPickSpot(q, i)}
-            hint="这道题点一下就行 ——"
-          />
-        ) : (
-          <p className="text-[11.5px] text-ink-400 mt-1.5">
-            这道题不打分 —— 我拿它看看你从哪儿开始最合适。
-          </p>
-        )}
       </div>
     )
   }
@@ -966,13 +792,27 @@ function CoreNote({ text }: { text: string }) {
  * 本子背面 · 画像 V0
  *
  * 明确标注为「原型可视化」：产品里学生看不到这一页，
- * 它的作用是把「趣味外壳下面的科学内核」摊给评审看。全部内容沿用原稿，未删改。
+ * 它的作用是把「趣味外壳下面的科学内核」摊给评审看。
  *
- * 这一版在最上面多了一张卡：冷启动那一分钟写出来的「前一页」（见本文件顶部 ③）。
- * 它和下面那些系统侧字段不是两套数据 —— 首页那本本子接着它往下写。
+ * 这一版的大五粗档是**从刚才那 10 个答案当场算出来的**（tallyTraits），
+ * 不是写死的 —— 写死会让这一页变成摆设：答案怎么改，画像纹丝不动。
  */
-function ProfilePage({ roleId, notes, onDone }: { roleId: string; notes: Note[]; onDone: () => void }) {
+function ProfilePage({
+  roleId,
+  notes,
+  answers,
+  interest,
+  onDone,
+}: {
+  roleId: string
+  notes: Note[]
+  answers: (0 | 1)[]
+  interest: string | null
+  onDone: () => void
+}) {
   const role = avatarRoles.find(r => r.id === roleId)
+  const traits = tallyTraits(answers)
+
   return (
     <div className="flex-1 min-h-0 scroll-area bg-ink-50 px-4 py-4 space-y-3.5">
       <div className="rounded-2xl bg-warm-50 border border-dashed border-warm-200 px-3.5 py-2.5">
@@ -983,7 +823,8 @@ function ProfilePage({ roleId, notes, onDone }: { roleId: string; notes: Note[];
       </div>
 
       <div className="card p-4 flex items-center gap-3">
-        <ClassmateAvatar mood="happy" size={56} roleId={roleId} className="shrink-0" />
+        {/* 冷启动结束的庆祝时刻：56px 够大，用 B 版把「高兴」拉满 */}
+        <ClassmateAvatarV2 mood="happy" size={56} roleId={roleId} variant="B" className="shrink-0" />
         <div className="min-w-0">
           <div className="text-[16px] font-bold text-ink-900">认识完了，我是{role?.name}</div>
           <p className="text-[12.5px] text-ink-500 leading-relaxed mt-0.5">
@@ -1022,13 +863,17 @@ function ProfilePage({ roleId, notes, onDone }: { roleId: string; notes: Note[];
       </div>
 
       <div className="card p-4">
-        <div className="flex items-center gap-2 mb-2.5">
+        <div className="flex items-center gap-2 mb-1">
           <IconSpark className="w-4 h-4 text-brand-600" />
           <h3 className="text-[15px] font-bold text-ink-900">画像 V0（系统侧，学生不可见）</h3>
         </div>
+        <p className="text-[11.5px] text-ink-400 leading-relaxed mb-3">
+          大五粗档是从刚才那 10 个答案**当场数出来的**，不是预设值。每维只有 2 题，
+          所以只够分「偏低 / 中等 / 偏高」三档 —— 够用了，不装精确。
+        </p>
 
         <div className="space-y-2 mb-3">
-          {profileV0.traits.map(t => (
+          {traits.map(t => (
             <div key={t.name} className="rounded-xl bg-ink-50 px-3 py-2.5">
               <div className="flex items-center gap-2">
                 <span className="text-[13px] font-semibold text-ink-800">{t.name}</span>
@@ -1039,31 +884,31 @@ function ProfilePage({ roleId, notes, onDone }: { roleId: string; notes: Note[];
           ))}
         </div>
 
-        <div className="rounded-xl bg-brand-50 px-3 py-2.5 mb-2">
-          <div className="text-[12.5px] font-bold text-brand-700 mb-0.5">学习动机</div>
-          <p className="text-[12px] text-brand-700/90 leading-relaxed">{profileV0.motivation}</p>
-        </div>
-
         <div className="rounded-xl bg-warm-50 px-3 py-2.5 mb-2">
           <div className="text-[12.5px] font-bold text-warm-700 mb-1">兴趣爱好 → 出题情境素材库</div>
-          <div className="flex gap-1.5 flex-wrap">
-            {profileV0.interests.map(i => (
-              <span key={i} className="chip bg-white text-warm-700 text-[11.5px]">
-                {i}
-              </span>
-            ))}
-          </div>
+          {interest ? (
+            <div className="flex gap-1.5 flex-wrap">
+              <span className="chip bg-white text-warm-700 text-[11.5px]">{interest}</span>
+            </div>
+          ) : (
+            <p className="text-[11.5px] text-warm-700/90 leading-relaxed">
+              这一步你没说，我没追问 —— 等哪天你自己提起，我再记。
+            </p>
+          )}
         </div>
 
-        <div className="space-y-1.5">
-          {profileV0.startPoint.map(s => (
-            <div key={s.subject} className="rounded-xl bg-ink-50 px-3 py-2">
-              <div className="text-[12.5px] text-ink-800">
-                <span className="font-semibold">{s.subject}</span> · {s.level}
+        {/* 第一天没测得的东西，如实列出来。不假装什么都知道 */}
+        <div className="rounded-xl border border-dashed border-ink-200 px-3 py-2.5">
+          <div className="text-[12.5px] font-bold text-ink-700 mb-1.5">还没测的（不猜，等它自己出来）</div>
+          <div className="space-y-2">
+            {profileV0.pending.map(p => (
+              <div key={p.name}>
+                <div className="text-[12px] text-ink-800 font-semibold">{p.name}</div>
+                <p className="text-[11.5px] text-ink-500 leading-relaxed mt-0.5">{p.why}</p>
+                <p className="text-[11px] text-brand-600 mt-0.5">补上时间：{p.when}</p>
               </div>
-              <p className="text-[11.5px] text-ink-400 mt-0.5">依据：{s.basis}</p>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </div>
 
@@ -1083,6 +928,7 @@ function ProfilePage({ roleId, notes, onDone }: { roleId: string; notes: Note[];
         <IconCheck className="w-4 h-4 text-cheer-600 shrink-0 mt-0.5" />
         <p className="text-[12.5px] text-cheer-700 leading-relaxed">
           大五人格只用来适配「怎么陪你学」（节奏、反馈密度、题目情境），不会以「你是什么样的人」形式输出给你或家长。
+          本子上那三行也不是对你的评价 —— 是我答应你的事。
         </p>
       </div>
 
