@@ -5,6 +5,8 @@ import ClassmateAvatarV2 from '@/components/common/ClassmateAvatarV2'
 import { SketchFrame, Handwrite } from '@/components/common/SketchFrame'
 import TalkButton from '@/components/common/TalkButton'
 import { useSpeech, useListening, wait } from '@/hooks/useSpeech'
+import { followUpOf, isUnderReview } from '@/lib/followUp'
+import type { FollowUp } from '@/types'
 import {
   IconShield,
   IconClock,
@@ -68,6 +70,8 @@ interface Props {
   roleId: string
   onPhoto: () => void
   onStartTask: () => void
+  /** pointId → 当前复查状态。首页要据此决定「今天插不插那道复查题」 */
+  followUps: Record<string, FollowUp>
 }
 
 /** 学生没说话时的模拟识别台词（真识别不可用时才用，界面会标注） */
@@ -80,9 +84,11 @@ const GENTLE_REPLIES = [
   '好，今天到这儿。你已经把「电压为 0 说明元件是好的」弄明白了，这个不会丢。',
 ]
 
-export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask }: Props) {
+export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask, followUps }: Props) {
   const role = findRole(roleId)
   const wp = weakPoints[0]
+  /** 这个薄弱点**此刻**的复查状态 —— 种子数据只是初值，真正说了算的是 App 那一层 */
+  const fu = followUpOf(followUps, wp)
 
   const [lines, setLines] = useState<Line[]>([])
   const [thinking, setThinking] = useState<string | null>(null)
@@ -158,8 +164,22 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
      * 不是发提醒让学生自己去复习，而是他本来就要做这道题时，系统顺手插一道复查。
      * 触发条件就是 weakPoints[0].followUp.nextTrigger 里写的那句。
      */
-    if (wp.followUp && wp.followUp.status !== '已巩固') {
-      await say('对了，上次说好要复查的——今天正好又要做电路题，我先插一道短的，看看是不是真记住了。', id)
+    /*
+     * ⚠️ 这里原来是 `wp.followUp.status !== '已巩固'` —— 字面量比较。
+     * 加「已移出」这个状态时，这种写法**编译器不会报错**，
+     * 结果是已经归档的薄弱点还会被插复查题。改成调 isUnderReview()，
+     * 规则只写在状态机里一处，界面不再各判各的。
+     *
+     * 另外注意：这里用的是 fu（App 里的实时状态），不是 wp.followUp（种子数据）。
+     * 走完一次辅导回来，这句台词会跟着状态变 —— 状态机是不是真的活着，看这里最直接。
+     */
+    if (fu && isUnderReview(fu)) {
+      await say(
+        fu.status === '待复查'
+          ? '对了，上次说好要复查的——今天正好又要做电路题，我先插一道短的，看看是不是真记住了。'
+          : '这道电路的复查还没完。上一轮你过了，但过几天再看一次才算数 —— 我再插一道。',
+        id,
+      )
     }
     if (alive(id)) setPhase('waiting')
   }

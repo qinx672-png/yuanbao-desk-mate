@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { GuideDepth, ScreenId, WatchMark } from '@/types'
+import type { GuideDepth, ScreenId, WatchMark, FollowUp } from '@/types'
+import { advance, seedFollowUps, isUnderReview, type ReviewOutcome } from '@/lib/followUp'
 import PhoneFrame from '@/components/shell/PhoneFrame'
 import ScreenNav from '@/components/shell/ScreenNav'
 import DesignNotes from '@/components/shell/DesignNotes'
 import WatchFace from '@/components/watch/WatchFace'
 import { watchSeedMarks, nextMarkTime } from '@/data/watchDemo'
-import { classNote } from '@/data/mockData'
+import { classNote, weakPoints } from '@/data/mockData'
 import AppBar from '@/components/common/AppBar'
 import TabBar from '@/components/common/TabBar'
 import RestReminder from '@/components/common/RestReminder'
@@ -41,6 +42,15 @@ const REST_THRESHOLD = 40
  */
 type ShootKind = 'newProblem' | 'myWork'
 
+/**
+ * 演示动线里，辅导流程对应的就是首页说的那个薄弱点（weakPoints[0]）。
+ *
+ * ⚠️ 真机上这里应该是「这道题命中了哪个知识点」——由题目识别给出，
+ * 而不是永远取第一条。原型里只有一条主线，所以写死；
+ * 真接上知识点库之后，这个常量要换成从 diagnosis 结果里取。
+ */
+const DEMO_REVIEW_POINT = weakPoints[0].pointId
+
 export default function App() {
   const [screen, setScreen] = useState<ScreenId>('role')
   const [studyMinutes, setStudyMinutes] = useState(36)
@@ -73,6 +83,29 @@ export default function App() {
 
   /* 老师此刻讲到第几条 —— 手表靠它把打点自动挂到对应的知识点上 */
   const watchPoint = watchMarks.length % classNote.knowledgePoints.length
+
+  /*
+   * ── 薄弱点复查状态（跨屏）────────────────────────────────
+   * 和 watchMarks 同一个理由放在这一层：这条链路本身就是
+   * 「一个动作跨三块屏」—— 学生首页说「今天插一道复查」，
+   * 辅导流程里做掉，成长中心和家长端看到结果。状态不属于任何单独一屏。
+   *
+   * 初值从 mockData 的种子里摊平；之后只能通过 advance() 改，
+   * 规则写在 lib/followUp.ts 一处。
+   */
+  const [followUps, setFollowUps] = useState<Record<string, FollowUp>>(() => seedFollowUps(weakPoints))
+
+  /** 推进一次复查。演示控制条和辅导流程走的是同一个入口，不存在两套规则 */
+  const advanceFollowUp = useCallback((pointId: string, outcome: ReviewOutcome) => {
+    setFollowUps(m => {
+      const cur = m[pointId]
+      if (!cur) return m
+      return { ...m, [pointId]: advance(cur, outcome) }
+    })
+  }, [])
+
+  /** 演示要反复走，得能回到初始状态（对照 resetWatch） */
+  const resetFollowUps = useCallback(() => setFollowUps(seedFollowUps(weakPoints)), [])
 
   const isStudent = screen.startsWith('stu-')
 
@@ -175,6 +208,7 @@ export default function App() {
             roleId={roleId}
             onPhoto={() => go('stu-photo')}
             onStartTask={restartTutor}
+            followUps={followUps}
           />
         )
       case 'stu-photo':
@@ -193,6 +227,33 @@ export default function App() {
             onShootNew={restartTutor}
             onFinish={r => {
               setMastered(r.mastered)
+
+              /*
+               * ── 复查闭环的写回点 ──────────────────────────────
+               * 首页说过「今天正好又要做电路题，我先插一道复查」——
+               * 这道题做完了，结果就得写回状态机，否则那句话说了等于没说。
+               *
+               * 两个「不写回」的分支，都是有理由的：
+               *
+               * ① 学生说「先停一下」主动退出（exited）→ **不写回**。
+               *    这不能算「复查没通过」。同一个产品里 3.2 写得很清楚：
+               *    体面退出、不留未完成标记。把主动休息记成失败，
+               *    是自己打自己的脸。没查就没查，状态保持原样，
+               *    下次做到同类题再插一道。
+               *
+               * ② 这个薄弱点已经不在复查循环里 → 不写回。
+               *    首页插复查题的条件就是 isUnderReview，
+               *    状态推进的条件必须是同一个 —— 否则会出现
+               *    「没插复查题，状态却动了」这种对不上的情况。
+               */
+              if (!r.exited) {
+                setFollowUps(m => {
+                  const cur = m[DEMO_REVIEW_POINT]
+                  if (!cur || !isUnderReview(cur)) return m
+                  return { ...m, [DEMO_REVIEW_POINT]: advance(cur, r.mastered ? '通过' : '未通过') }
+                })
+              }
+
               go('stu-summary')
             }}
           />
@@ -200,7 +261,7 @@ export default function App() {
       case 'stu-summary':
         return <SessionSummary mastered={mastered} onGrowth={() => go('stu-growth')} onHome={() => go('stu-home')} />
       case 'stu-growth':
-        return <GrowthCenter onOpen={go} />
+        return <GrowthCenter onOpen={go} followUps={followUps} />
       case 'stu-watch':
         return (
           <ClassNote
@@ -215,7 +276,8 @@ export default function App() {
       case 'par-weekly':
         return <WeeklyReport onOpen={go} />
       case 'par-weak':
-        return <WeakPointsReport onOpen={go} />
+        /* 家长端和学生端读的是同一份复查状态 —— 两边各存一份，迟早对不上 */
+        return <WeakPointsReport onOpen={go} followUps={followUps} />
       case 'par-trend':
         return <StateTrend />
       case 'par-assistant':
@@ -295,6 +357,59 @@ export default function App() {
           </DemoBtn>
           <DemoBtn onClick={restartTutor}>重走辅导流程</DemoBtn>
           {screen === 'stu-watch' && <DemoBtn onClick={resetWatch}>重置手表演示</DemoBtn>}
+
+          {/*
+            ── 复查状态机 ────────────────────────────────────────
+            两条路都能推进它，走的是同一个 advance()，不存在两套规则：
+
+            ① 走一遍辅导流程（学生端说「接着讲」→ 做完）→ 真的推进 k1。
+               这是「场景触发」那条路，也是产品的主路径。
+            ② 这里的手动按钮。给的是「时间兜底」那条路：
+               已巩固 → 已移出 靠的是 21 天后的定时抽查，
+               日常做题流程本来就不该触发它，所以只能手动推。
+
+            界面上的状态变化看这两处：成长中心 → 薄弱知识点；
+            家长端 → 薄弱知识点分析。
+          */}
+          <div className="w-full mt-0.5 pt-2 border-t border-dashed border-ink-200">
+            <div className="flex items-center gap-2 mb-1.5">
+              <span className="text-[11px] font-bold text-ink-400">复查状态机</span>
+              <button
+                onClick={resetFollowUps}
+                className="ml-auto shrink-0 text-[11px] text-brand-600 underline underline-offset-2"
+              >
+                重置复查
+              </button>
+            </div>
+            <div className="space-y-1">
+              {weakPoints.map(w => {
+                const f = followUps[w.pointId]
+                if (!f) return null
+                return (
+                  <div key={w.id} className="flex items-center gap-1.5">
+                    <span className="w-[118px] shrink-0 truncate text-[11.5px] text-ink-700">{w.name}</span>
+                    <span
+                      className={`chip shrink-0 text-[10.5px] tabular-nums ${
+                        f.needsReteach ? 'bg-warm-50 text-warm-700' : 'bg-ink-100 text-ink-600'
+                      }`}
+                    >
+                      {f.needsReteach ? '先重讲 · ' : ''}
+                      {f.status} · {f.round} 轮
+                    </span>
+                    {/* 已移出是终点：没有复查可做，按钮就不该还能按（别让界面承诺状态机做不到的事） */}
+                    {f.status === '已移出' ? (
+                      <span className="text-[11px] text-ink-400">已归档，不再排复查</span>
+                    ) : (
+                      <>
+                        <DemoBtn onClick={() => advanceFollowUp(w.pointId, '通过')}>通过</DemoBtn>
+                        <DemoBtn onClick={() => advanceFollowUp(w.pointId, '未通过')}>没通过</DemoBtn>
+                      </>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
         </div>
       </main>
 

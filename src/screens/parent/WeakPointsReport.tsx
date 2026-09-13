@@ -1,14 +1,20 @@
 import { weakPoints } from '@/data/mockData'
 import { IconArrowRight, IconBook, IconCheck } from '@/components/common/Icons'
-import type { ScreenId } from '@/types'
+import type { ScreenId, FollowUp } from '@/types'
+import { followUpOf, hasNextReview } from '@/lib/followUp'
 
 interface Props {
   onOpen: (id: ScreenId) => void
+  /** pointId → 当前复查状态。和家长端看到的必须是同一份 —— 否则家长和学生看到两条时间线 */
+  followUps: Record<string, FollowUp>
 }
 
 const mastered = ['并联电路电流规律', '二次函数与一元二次方程', '因式分解法解方程', '电压表的正确使用']
 
-export default function WeakPointsReport({ onOpen }: Props) {
+export default function WeakPointsReport({ onOpen, followUps }: Props) {
+  /* 学生端的复查进度，家长这边读的是同一份状态 */
+  const list = weakPoints.map(w => ({ w, f: followUpOf(followUps, w) }))
+
   return (
     <div className="flex-1 min-h-0 scroll-area bg-ink-50 px-5 py-5 space-y-4">
       <div className="rounded-2xl bg-white border border-ink-100 p-4">
@@ -17,7 +23,7 @@ export default function WeakPointsReport({ onOpen }: Props) {
         </p>
       </div>
 
-      {weakPoints.map(w => (
+      {list.map(({ w, f }) => (
         <div key={w.id} className="card p-5">
           <div className="flex items-center gap-2 mb-1.5">
             <span
@@ -77,19 +83,24 @@ export default function WeakPointsReport({ onOpen }: Props) {
             家长看完「哪里弱」，下一个问题一定是「那你们打算怎么办」。
             这一块回答它——也是题目背景里「持续跟进」四个字落到家长眼里的样子。
           */}
-          {w.followUp && (
+          {f && (
             <div className="mt-3 rounded-2xl bg-parent-50 border border-parent-100 p-4">
               <div className="flex items-center gap-2 mb-1">
-                <span className="text-[13.5px] font-bold text-parent-700">接下来怎么跟进</span>
+                <span className="text-[13.5px] font-bold text-parent-700">
+                  {/* 还排着下一次才是「接下来」，没有了就该有个交代，不能一直吊着家长 */}
+                  {hasNextReview(f) ? '接下来怎么跟进' : '这个知识点已经巩固'}
+                </span>
                 <span className="chip bg-white text-parent-600 text-[11px] border border-parent-100 ml-auto shrink-0">
-                  {w.followUp.status}
+                  {f.status}
                 </span>
               </div>
               <p className="text-[13px] text-parent-700/90 leading-relaxed">
-                {w.followUp.nextTrigger}
-                {w.followUp.mode === '场景触发'
-                  ? ' —— 不额外占用孩子的时间，复习在他本来就要做的那道题里完成。'
-                  : ' —— 没等到合适时机的题，系统会主动提醒，不需要您盯着。'}
+                {f.nextTrigger}
+                {/* 触发方式那句只对「还有下一次」的状态成立 */}
+                {hasNextReview(f) &&
+                  (f.mode === '场景触发'
+                    ? ' —— 不额外占用孩子的时间，复习在他本来就要做的那道题里完成。'
+                    : ' —— 没等到合适时机的题，系统会主动提醒，不需要您盯着。')}
               </p>
             </div>
           )}

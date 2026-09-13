@@ -2,17 +2,27 @@ import { useState } from 'react'
 import { wrongProblems, weakPoints, progressCurve, classNote } from '@/data/mockData'
 import { IconShield, IconCheck, IconArrowRight, IconClock } from '@/components/common/Icons'
 import type { ScreenId, FollowUp } from '@/types'
+import { followUpOf, hasNextReview } from '@/lib/followUp'
 
 /* 跟进状态 → 配色。标签只放状态词，解释放在下面那行里 */
 const followUpTone: Record<FollowUp['status'], string> = {
   待复查: 'bg-warm-50 text-warm-700',
   复查中: 'bg-brand-50 text-brand-700',
   已巩固: 'bg-cheer-50 text-cheer-700',
+  /* 已移出 = 归档，用中性灰 —— 它不该再抢注意力，这正是「移出重点」的意思 */
+  已移出: 'bg-ink-100 text-ink-500',
 }
 
 type Tab = 'wrong' | 'weak' | 'curve'
 
-export default function GrowthCenter({ onOpen }: { onOpen: (id: ScreenId) => void }) {
+export default function GrowthCenter({
+  onOpen,
+  followUps,
+}: {
+  onOpen: (id: ScreenId) => void
+  /** pointId → 当前复查状态。由 App 持有 —— 这条链路跨屏，状态不属于任何单独一屏 */
+  followUps: Record<string, FollowUp>
+}) {
   const [tab, setTab] = useState<Tab>('wrong')
 
   const tabs: { key: Tab; label: string }[] = [
@@ -59,7 +69,7 @@ export default function GrowthCenter({ onOpen }: { onOpen: (id: ScreenId) => voi
         </button>
 
         {tab === 'wrong' && <WrongList />}
-        {tab === 'weak' && <WeakList />}
+        {tab === 'weak' && <WeakList followUps={followUps} />}
         {tab === 'curve' && <Curve />}
 
         <div className="mt-5 rounded-2xl bg-cheer-50 border border-cheer-100 p-4 flex gap-2.5">
@@ -116,14 +126,21 @@ function WrongList() {
   )
 }
 
-function WeakList() {
+function WeakList({ followUps }: { followUps: Record<string, FollowUp> }) {
+  /*
+   * 先把种子数据配成「薄弱点 + 它当前的复查状态」。
+   * 下面整段 JSX 不用再做任何判断 —— 显示层只管显示，
+   * 「这条还在不在复查里」由状态机说了算。
+   */
+  const list = weakPoints.map(w => ({ w, f: followUpOf(followUps, w) }))
+
   return (
     <div className="space-y-3">
       <p className="text-[12px] text-ink-400 leading-relaxed">
         识别出来不等于记住了。每个薄弱点都会排一次复查——
         优先在你下次做到同类题时顺手插一道，等不到才用时间提醒。
       </p>
-      {weakPoints.map(w => (
+      {list.map(({ w, f }) => (
         <div key={w.id} className="card p-4">
           <div className="flex items-center gap-2 mb-1.5">
             <span
@@ -135,10 +152,8 @@ function WeakList() {
             </span>
             <span className="text-[15.5px] font-bold text-ink-900">{w.name}</span>
             {/* 跟进状态：这一条回答的是「然后呢」——识别完就没下文，是最容易被评委追问的地方 */}
-            {w.followUp && (
-              <span className={`chip text-[11px] ml-auto shrink-0 ${followUpTone[w.followUp.status]}`}>
-                {w.followUp.status}
-              </span>
+            {f && (
+              <span className={`chip text-[11px] ml-auto shrink-0 ${followUpTone[f.status]}`}>{f.status}</span>
             )}
           </div>
           <div className="text-[12px] text-ink-400 mb-3">📚 {w.chapter}</div>
@@ -166,21 +181,23 @@ function WeakList() {
           )}
 
           {/* 「持续跟进」这一环：什么时候复查、谁来记得 */}
-          {w.followUp && (
+          {f && (
             <div className="mt-3 rounded-xl bg-ink-50 border border-ink-100 px-3 py-2.5">
               <div className="flex items-center gap-1.5 mb-1">
                 <IconClock className="w-3.5 h-3.5 text-ink-400 shrink-0" />
                 <span className="text-[12.5px] font-bold text-ink-700">
-                  下次怎么复查
-                  {w.followUp.round > 0 && (
-                    <span className="text-ink-400 font-medium"> · 第 {w.followUp.round} 轮</span>
-                  )}
+                  {/* 还排着下一次就问「下次怎么复查」，没有了下一次才说「已完成」 */}
+                  {hasNextReview(f) ? '下次怎么复查' : '复查已完成'}
+                  {f.round > 0 && <span className="text-ink-400 font-medium"> · 第 {f.round} 轮</span>}
                 </span>
-                <span className="chip bg-white text-ink-500 text-[10.5px] border border-ink-100 ml-auto shrink-0">
-                  {w.followUp.mode}
-                </span>
+                {/* 触发方式（场景/时间）只对「还有下一次」的状态有意义 */}
+                {hasNextReview(f) && (
+                  <span className="chip bg-white text-ink-500 text-[10.5px] border border-ink-100 ml-auto shrink-0">
+                    {f.mode}
+                  </span>
+                )}
               </div>
-              <p className="text-[12.5px] text-ink-500 leading-relaxed">{w.followUp.nextTrigger}</p>
+              <p className="text-[12.5px] text-ink-500 leading-relaxed">{f.nextTrigger}</p>
             </div>
           )}
         </div>
