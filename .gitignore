@@ -3,3 +3,21 @@ dist
 dist-single
 *.tsbuildinfo
 .DS_Store
+
+# 豆包 TTS 凭据。scripts/gen-voice.mjs 从这里读，
+# 丢了 APPID 和 Access Key 就等于把语音接口白送人。
+# ⚠️ 这一条必须留着 —— 别以为「反正是原型」就放行。
+.env.local
+.env*.local
+
+# 试听小样的草稿（scripts/voice-audition.mjs 生成）。
+# 是挑音色时的一次性产物，挑完就该重生成，不进仓库也不进交付包。
+#
+# ⚠️ 2026-09-15：改成 **/ 前缀。原来写 public/voice/_try/ 只拦得住源目录 ——
+# vite build 会把它整个抄进 dist/、再拷进 docs/，从后门溜进交付包。
+**/voice/_try/
+**/voice/_audition.html
+
+# 生成语音前留的一次性备份（gen-voice.mjs 改参数前存的底）。
+# 是本地保险，不是交付物。
+scripts/_bak-*/

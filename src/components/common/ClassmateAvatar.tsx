@@ -19,7 +19,7 @@ interface Props {
   size?: number
   className?: string
   style?: CSSProperties
-  /** 角色 id，缺省用默认形象「小蓝」 */
+  /** 角色 id，缺省用 a2（文静系）。形象不再带名字，见 ./ClassmateAvatarV2 顶部说明 */
   roleId?: string
 }
 
@@ -46,7 +46,7 @@ export default function ClassmateAvatar({ mood = 'listening', size = 96, classNa
   const skinShade = shade(p.skin)
 
   return (
-    <div className={className} style={style} aria-label={`数字同桌 ${role.name} · ${MOOD_LABEL[mood]}`}>
+    <div className={className} style={style} aria-label={`数字同桌 小元 · ${MOOD_LABEL[mood]}`}>
       <svg width={size} height={size} viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
         <defs>
           <linearGradient id={`bg-${uid}`} x1="0" y1="0" x2="0" y2="1">

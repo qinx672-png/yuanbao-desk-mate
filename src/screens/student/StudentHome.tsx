@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import { student, weakPoints, reviewCards, todayTasks } from '@/data/mockData'
+import { TONGZHUO_NAME, student, weakPoints, reviewCards, todayTasks } from '@/data/mockData'
 import { findRole } from '@/components/common/ClassmateAvatar'
 import ClassmateAvatarV2 from '@/components/common/ClassmateAvatarV2'
 import { SketchFrame, Handwrite } from '@/components/common/SketchFrame'
 import TalkButton from '@/components/common/TalkButton'
 import { useSpeech, useListening, wait } from '@/hooks/useSpeech'
 import { followUpOf, isUnderReview } from '@/lib/followUp'
-import type { FollowUp } from '@/types'
+import type { FollowUp, TutorSnapshot } from '@/types'
 import {
   IconShield,
   IconClock,
@@ -16,6 +16,7 @@ import {
   IconChart,
   IconSound,
   IconSoundOff,
+  IconCamera,
 } from '@/components/common/Icons'
 
 /**
@@ -53,8 +54,16 @@ import {
  * 「累」这条路通向台阶而不是催促（定位说明 3.2 体面退出）。
  */
 
+/**
+ * 便利贴上的去向。
+ * `resume` 是「接着上次」—— 和 `tutor`（从头开始）是两回事：
+ * 一个带着断点进，一个把断点作废。演示时这两个按钮必须都能点，
+ * 否则「断点续学」在首页根本看不见。
+ */
+type Go = 'tutor' | 'photo' | 'resume'
+
 type Widget =
-  | { kind: 'cite'; chapter: string; sub: string; ctas?: { label: string; go: 'tutor' | 'photo' }[] }
+  | { kind: 'cite'; chapter: string; sub: string; ctas?: { label: string; go: Go }[] }
   | { kind: 'review'; name: string; chapter: string; body: string }
   | { kind: 'practice'; items: typeof todayTasks }
   | { kind: 'timer'; minutes: number; note: string }
@@ -72,6 +81,10 @@ interface Props {
   onStartTask: () => void
   /** pointId → 当前复查状态。首页要据此决定「今天插不插那道复查题」 */
   followUps: Record<string, FollowUp>
+  /** 上次留下的断点。有值 → 开场走「接着上次」那条路 */
+  snapshot: TutorSnapshot | null
+  /** 带着断点进辅导流程（不清断点，见 App.resumeTutor） */
+  onResume: () => void
 }
 
 /** 学生没说话时的模拟识别台词（真识别不可用时才用，界面会标注） */
@@ -84,7 +97,15 @@ const GENTLE_REPLIES = [
   '好，今天到这儿。你已经把「电压为 0 说明元件是好的」弄明白了，这个不会丢。',
 ]
 
-export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask, followUps }: Props) {
+export default function StudentHome({
+  studyMinutes,
+  roleId,
+  onPhoto,
+  onStartTask,
+  followUps,
+  snapshot,
+  onResume,
+}: Props) {
   const role = findRole(roleId)
   const wp = weakPoints[0]
   /** 这个薄弱点**此刻**的复查状态 —— 种子数据只是初值，真正说了算的是 App 那一层 */
@@ -95,7 +116,7 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
   const [phase, setPhase] = useState<'busy' | 'waiting'>('busy')
   const [leaving, setLeaving] = useState<string | null>(null)
 
-  const { speak, stop, muted, setMuted, ttsReady } = useSpeech()
+  const { speak, stop, muted, setMuted, canSpeak } = useSpeech()
   const { listen } = useListening()
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -148,6 +169,38 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
     const id = ++runRef.current
     setPhase('busy')
     await say(`哈喽${student.name}同学，下午好啊。`, id)
+
+    /*
+     * ── 有断点：走「接着上次」这条路，不重讲 ────────────────────
+     * 学生上次是**自己选择停下的**（保存进度 / 今天先放一放），
+     * 回来时最不该听的就是把昨天那道题从头再讲一遍 ——
+     * 那等于告诉他「你上次说的不算，我们重来」。
+     *
+     * 所以这条路开场只有三拍：打个招呼 → 本子还在、停在哪 → 你说了算。
+     * 两个按钮都必须能点：一个接着上次（不清断点），一个从头讲（清断点）。
+     *
+     * ⚠️ 这条路**跳过**下面那段复查提示，是有意的：
+     * 学生此刻就站在那道电路题的中间，再插一道同知识点的复查是重复劳动。
+     * 复查照常在「没有断点」的正常开场里出现 —— 那条路一点没动。
+     */
+    if (snapshot) {
+      await show(
+        {
+          kind: 'cite',
+          chapter: `上次停在「${snapshot.title}」`,
+          sub: `本子上还留着 ${snapshot.history.length} 句 · 一句没丢`,
+          ctas: [
+            { label: '接着那一步', go: 'resume' },
+            { label: '从头讲一遍', go: 'tutor' },
+          ],
+        },
+        id,
+      )
+      await say('接着上次那一步，还是从头讲一遍？你说了算。', id)
+      if (alive(id)) setPhase('waiting')
+      return
+    }
+
     await say(`昨天你卡在「${wp.name}」这道题上，`, id)
     await show(
       {
@@ -187,10 +240,28 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
   /**
    * 学生这一轮说了什么。
    * typed 有值＝点选/打字（学生明确表达，不算模拟）；无值＝走真语音识别。
+   *
+   * ── 允许打断 ────────────────────────────────────────────────
+   * 这里原来是 `if (phase !== 'waiting') return` —— 同桌说话时插不进来。
+   * 后果是冷启动那 20 秒（开场白三句 + 便利贴 + 可能的复查提示）
+   * 学生只能干等，麦克风还是灰的。对话不该是单向广播。
+   *
+   * 打断用的机制本来就是现成的（runRef 自增即作废此前所有在飞的段落），
+   * 只是没接到按钮上。这里补齐三件事：
+   *   ① 作废在飞的段落  ② 掐掉正在念的语音  ③ 清掉「同桌想了一下」
+   *
+   * 已经写进本子的那半句**不撤回** —— 本子是这场对话的记录，
+   * 说出口的话不该凭空消失。真实产品该做的是把没念完的部分
+   * 标成「被打断」，原型没做这一步，属于已知的简化。
    */
   const onSay = async (typed?: string) => {
-    if (phase !== 'waiting') return
+    if (leaving) return // 正在离开这一屏，说什么都晚了
+    if (phase === 'busy') {
+      runRef.current++
+      stop()
+    }
     const id = runRef.current
+    setThinking(null)
     setPhase('busy')
 
     let text: string
@@ -216,7 +287,7 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
     }
 
     setLines(l => [...l, { kind: 'me', text, via, simulated }])
-    const p = plan(text)
+    const p = plan(text, studyMinutes)
     setThinking(p.think)
     await wait(1000)
     if (!alive(id)) return
@@ -235,12 +306,23 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
   }
 
   /** 便利贴里的下一步。动作长在生成物里，不是常驻按钮。 */
-  const goFrom = (go: 'tutor' | 'photo') => {
+  const goFrom = (go: Go) => {
     if (leaving) return
     runRef.current++
     stop()
-    setLeaving(go === 'photo' ? '好，把题拍给我 —— 只拍题目就行。' : '好，那我们现在开始。')
-    timers.current.push(window.setTimeout(() => (go === 'photo' ? onPhoto() : onStartTask()), 1000))
+    setLeaving(
+      go === 'photo'
+        ? '好，把题拍给我 —— 只拍题目就行。'
+        : go === 'resume'
+          ? '好，那我们从上次停下的地方接着来。'
+          : '好，那我们现在开始。',
+    )
+    timers.current.push(
+      window.setTimeout(
+        () => (go === 'photo' ? onPhoto() : go === 'resume' ? onResume() : onStartTask()),
+        1000,
+      ),
+    )
   }
 
   /** 「累」那条路：给台阶，不催促（定位说明 3.2 体面退出） */
@@ -272,7 +354,7 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
           aria-label={muted ? '打开同桌的声音' : '静音'}
         >
           {muted ? <IconSoundOff className="w-3.5 h-3.5" /> : <IconSound className="w-3.5 h-3.5" />}
-          {muted ? '已静音' : ttsReady ? '同桌有声' : '字幕模式'}
+          {muted ? '已静音' : canSpeak ? '同桌有声' : '字幕模式'}
         </button>
         <div className="chip bg-ink-50 text-ink-500">
           <IconClock className="w-3.5 h-3.5" />
@@ -284,7 +366,7 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
       <div className="shrink-0 bg-gradient-to-b from-white to-[#eaf2fb] px-4 pt-1.5 pb-2 border-b border-ink-100/70 flex items-center gap-2.5">
         {/* 38px 太小：符号层缩到 0.95px 会变成噪点，所以只用 A 版（五官），状态交给右边的文字 */}
         <ClassmateAvatarV2 mood={thinking ? 'thinking' : phase === 'busy' ? 'explaining' : 'listening'} size={38} roleId={roleId} variant="A" />
-        <span className="text-[14px] font-bold text-ink-900">你的同桌 · {role.name}</span>
+        <span className="text-[14px] font-bold text-ink-900">你的同桌 · {TONGZHUO_NAME}</span>
         <span className="chip bg-brand-50 text-brand-700 text-[10.5px]">{role.style}</span>
         <span className="ml-auto text-[11.5px] text-ink-400 truncate">
           {leaving ? '收拾书包…' : thinking ? '正在想…' : phase === 'busy' ? '正在说…' : '在听你说'}
@@ -333,11 +415,44 @@ export default function StudentHome({ studyMinutes, roleId, onPhoto, onStartTask
             {/* ── 麦克风：屏幕上唯一常驻的"控件"，其余都靠谈 ─────────
                 说 / 点 / 写三条等价通道，演示和课堂上都不用出声 */}
             <div className="pt-3 border-t border-dashed border-ink-200/80">
-              <TalkButton
-                onSay={onSay}
-                disabled={phase !== 'waiting' || !!leaving}
-                suggestions={SEEDS}
-              />
+              {/*
+                ── 麦克风 + 一支相机 ────────────────────────────────
+                相机是后加的：原来这一屏**没有任何拍题入口**，
+                而「有一道题不会」恰恰是这个产品最高频的第一入口 ——
+                学生手里正捏着卷子，却只能靠说话描述。
+
+                ⚠️ 位置和分寸是刻意的：
+                · 放在麦克风**边上**，不放上面，也不做成第二个大按钮 ——
+                  「屏幕上只有一个麦克风、没有按钮货架」这条原则不破；
+                · 描边、36px、淡色，视觉上明显比麦克风轻一档，是「一支笔」不是「第二个主按钮」；
+                · mt-[24px] = 容器 pt-1(4px) + (麦克风 76px − 相机 36px)/2 ——
+                  让**相机圆圈和麦克风圆圈同心**（都在距顶 42px），不是随便对齐。
+                  改麦克风或相机的尺寸，这个数要跟着重算。
+              */}
+              <div className="flex items-start justify-center gap-6">
+                <TalkButton
+                  onSay={onSay}
+                  /*
+                   * disabled 只表示「正在离开这一屏」。
+                   * 「同桌正在说」交给 speaking —— 它只改提示语和配色，不关门。
+                   * 原来这里传的是 `phase !== 'waiting'`，等于开场 20 秒三条通道全堵。
+                   */
+                  disabled={!!leaving}
+                  speaking={phase === 'busy'}
+                  suggestions={SEEDS}
+                />
+                <button
+                  onClick={onPhoto}
+                  disabled={!!leaving}
+                  aria-label="拍一道不会的题"
+                  className="tap mt-[24px] shrink-0 flex flex-col items-center gap-1.5 disabled:opacity-40"
+                >
+                  <span className="w-9 h-9 rounded-full border border-dashed border-brand-300 bg-brand-50/60 text-brand-600 flex items-center justify-center active:scale-95 transition">
+                    <IconCamera className="w-5 h-5" />
+                  </span>
+                  <span className="text-[11px] text-ink-400">拍题</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -371,7 +486,7 @@ interface Plan {
   go?: 'tutor' | 'photo'
 }
 
-function plan(text: string): Plan {
+function plan(text: string, studyMinutes: number): Plan {
   const wp = weakPoints[0]
   const r = reviewCards[0]
   const total = todayTasks.reduce((s, t) => s + t.minutes, 0)
@@ -383,7 +498,10 @@ function plan(text: string): Plan {
       say: '今天状态一般，那就别硬撑。',
       widget: {
         kind: 'gentle',
-        text: '你今天已经坐下来学了 36 分钟，这本身就够了。剩下的事，挑一个：',
+        /* 这个数必须跟顶栏那个时钟同源。以前这里写死 36，
+           而顶栏读的是实时 studyMinutes —— 学生学了 50 分钟后说「累」，
+           便利贴上还写着「你已经坐了 36 分钟」，两处对不上。 */
+        text: `你今天已经坐下来学了 ${studyMinutes} 分钟，这本身就够了。剩下的事，挑一个：`,
         options: ['换道简单的热热身', '存着，明天接着来', '今天先到这儿'],
       },
       after: '哪个都行，不选也没关系。',
@@ -420,8 +538,21 @@ function plan(text: string): Plan {
     }
   }
 
-  // ⑤ 答应了，直接开始 —— 不再生成多余的东西
-  if (/(接着|继续|开始|好|行|可以|来吧|嗯|要)/.test(text)) {
+  /*
+   * ⑤ 答应了，直接开始 —— 不再生成多余的东西。
+   *
+   * ⚠️ 这里原来是一串单字直接 test 全文：`/好|行|要|嗯|可以/`。
+   * 「这道题好难」「我不要做这个」「行列式是什么」全都命中，
+   * 学生一句话没说完就被拽进辅导流程。
+   *
+   * 拆成两条，缺一不可：
+   *   · bare     —— **整句就是一个应答词**才认（「好」「行吧」「嗯嗯」）
+   *   · explicit —— 或者明说要往下走（「接着」「继续」「开始吧」）
+   * 单个「好 / 行 / 要」出现在长句中间，一律不算答应。
+   */
+  const bareYes = /^(好|好的|好呀|好嘞|行|行吧|可以|可以啊|嗯|嗯嗯|要|来吧|来|成|OK|ok)[。！!，,~～\s]*$/
+  const explicit = /(接着|继续|开始讲|开始吧|我们开始|开始做)/
+  if (bareYes.test(text.trim()) || explicit.test(text)) {
     return {
       think: '学生答应了，直接进辅导。不用再摆一遍入口——那是货架的做法。',
       say: '好，那我们把题拿出来，我陪你一步步理。',
@@ -487,7 +618,7 @@ function NotebookLine({
 }: {
   line: Line
   first: boolean
-  onCta: (go: 'tutor' | 'photo') => void
+  onCta: (go: Go) => void
   onGentle: (idx: number, label: string) => void
 }) {
   if (line.kind === 'me') {
@@ -565,6 +696,17 @@ function NotebookLine({
             </div>
           ))}
         </div>
+        {/*
+          三道题原来是**死的文字** —— 排得挺像样，一条都点不动，
+          学生看完只能再开口说一次「开始吧」。生成物自己不带去向，
+          等于把「界面按需生成」做成了「界面按需展示」。
+        */}
+        <button
+          onClick={() => onCta('tutor')}
+          className="tap mt-2.5 text-[13px] font-bold text-brand-700 underline underline-offset-4 decoration-brand-300 decoration-2"
+        >
+          → 从第一道开始
+        </button>
       </SketchFrame>
     )
   }

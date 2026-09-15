@@ -41,6 +41,64 @@ function shareableSingleFile(): Plugin {
 }
 
 /**
+ * ── 台词收集口（只在 npm run dev 时存在）──────────────────────
+ *
+ * 同桌的音频是预渲染的（见 scripts/gen-voice.mjs），那就要知道
+ * 「App 到底会说哪些话」。手工从代码里扒一份清单是错的做法：
+ * 秦肖会不停改文案，扒一次就过期一次，扒漏了还不报错。
+ *
+ * 所以反过来 —— **App 播到哪句没有音频，就自己上报哪句**，
+ * 由这里追加进 scripts/voice-extra.json，gen-voice 只补缺的。
+ * 闭环，不需要人工维护清单。
+ *
+ * 生产构建里没有这个中间件，前端那侧也用 import.meta.env.DEV 挡着，
+ * 不会往线上发这种请求。
+ */
+function voiceLineCollector(): Plugin {
+  const FILE = path.resolve(__dirname, 'scripts/voice-extra.json')
+  return {
+    name: 'voice-line-collector',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use('/__voice/extra', (req, res) => {
+        if (req.method !== 'POST') {
+          res.statusCode = 405
+          return res.end()
+        }
+        let body = ''
+        req.on('data', c => (body += c))
+        req.on('end', () => {
+          try {
+            const { text } = JSON.parse(body || '{}')
+            if (typeof text === 'string' && text.trim().length >= 2) {
+              let list: string[] = []
+              if (fs.existsSync(FILE)) {
+                try {
+                  const j = JSON.parse(fs.readFileSync(FILE, 'utf-8'))
+                  if (Array.isArray(j)) list = j
+                } catch {
+                  /* 文件坏了就当空的，下面会整个覆盖写 */
+                }
+              }
+              const t = text.trim()
+              if (!list.includes(t)) {
+                list.push(t)
+                fs.writeFileSync(FILE, JSON.stringify(list, null, 2), 'utf-8')
+                console.log(`  [voice] 记下一句待合成：「${t.slice(0, 30)}」`)
+              }
+            }
+          } catch {
+            /* 前端上报失败不该影响任何事 */
+          }
+          res.statusCode = 204
+          res.end()
+        })
+      })
+    },
+  }
+}
+
+/**
  * 两种构建产物：
  * - npm run build         → dist/        常规多文件，用于 Vercel / Netlify / GitHub Pages 等托管
  * - npm run build:single  → dist-single/ 单个 HTML（JS/CSS 全部内联），可直接发微信/邮件，双击即开
@@ -49,7 +107,7 @@ export default defineConfig(({ mode }) => {
   const single = mode === 'single'
 
   return {
-    plugins: [react(), ...(single ? [viteSingleFile(), shareableSingleFile()] : [])],
+    plugins: [react(), voiceLineCollector(), ...(single ? [viteSingleFile(), shareableSingleFile()] : [])],
     base: './',
     resolve: {
       alias: {

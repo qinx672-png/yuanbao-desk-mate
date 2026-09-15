@@ -25,12 +25,28 @@ import { IconMic } from '@/components/common/Icons'
 export default function TalkButton({
   onSay,
   disabled,
+  speaking = false,
   hint = '按住说话',
   suggestions = [],
 }: {
   /** text 有值＝点选或打字（学生明确表达）；无值＝走真语音识别 */
   onSay: (typed?: string) => Promise<void>
+  /** 真不能动：正在离开这一屏。**不要用它来表示「同桌正在说」**，见下 */
   disabled?: boolean
+  /**
+   * 同桌正在说话。
+   *
+   * ── 为什么要有这个 prop ────────────────────────────────────
+   * 最初只有 `disabled`，首页传的是 `phase !== 'waiting'` —— 意思是
+   * 「同桌在说的时候你别插嘴」。后果是冷启动那 20 秒（开场白 + 便利贴）
+   * **三条通道全死**：麦克风是灰的、点选面板不出现、打字框也没有。
+   * 而上方文案还写着「说的、点的、写的，三条路都通」。
+   *
+   * 对话本来就不该是单向广播：真人同桌说话时你也可以打断。
+   * 现在 `speaking` 只影响**提示词和配色**，不关门 ——
+   * 打断的机制上层本来就实现了（作废在飞的段落 + 掐掉语音）。
+   */
+  speaking?: boolean
   hint?: string
   /** 「你可以这样说」的示范台词 —— 也是给不知道说什么的孩子的脚手架 */
   suggestions?: string[]
@@ -41,7 +57,14 @@ export default function TalkButton({
   const [draft, setDraft] = useState('')
   const startedAt = useRef(0)
 
-  const busy = disabled || pending
+  /*
+   * 关门条件只剩两个：
+   *   · disabled          —— 正在离开这一屏，说什么都没意义了
+   *   · pending && !speaking —— 学生刚说完、同桌还没开始接话的那一两帧，
+   *     挡住重复提交（真开始接话之后 speaking 变 true，门就开了，可以打断）
+   */
+  const busy = disabled || (pending && !speaking)
+  const talking = speaking && !busy
 
   const run = async (typed?: string) => {
     if (busy) return
@@ -75,9 +98,26 @@ export default function TalkButton({
   return (
     <div className="flex flex-col items-center gap-2 pt-1">
       <div className="relative">
-        {/* 呼吸圈：邀请孩子开口，但不催促 */}
+        {/*
+          ── 圆圈怎么表达状态（2026-09-13 重做，第一版做错了）──────────
+          教训：上一版把「同桌正在说」画成**白底 + 浅蓝描边**，想跟
+          「轮到你」区分开。结果秦肖一看就说「麦克风还是灰的、点不了」——
+          功能上明明能按，配色却读起来像禁用。**为了「不一样」牺牲了「能用」，
+          这是本末倒置。**
+
+          现在的分工，别再混：
+            · **颜色**只回答一个问题：「我现在能不能按」——
+              灰＝不能（正在离开这屏），实心蓝＝能。
+            · **动画和文字**回答另一个问题：「现在谁在说」——
+              蓝圈呼吸＝轮到你了；橙圈呼吸＝同桌正在说，你可以插话。
+          两件事各用各的通道，不互相挤占。
+        */}
         {!busy && !holding && (
-          <span className="absolute inset-0 rounded-full bg-brand-400/40 animate-breathe pointer-events-none" />
+          <span
+            className={`absolute inset-0 rounded-full animate-breathe pointer-events-none ${
+              talking ? 'bg-cheer-500/45' : 'bg-brand-400/40'
+            }`}
+          />
         )}
         <button
           onPointerDown={e => {
@@ -114,7 +154,13 @@ export default function TalkButton({
       </div>
 
       <div className="text-[12.5px] text-ink-500 h-5">
-        {holding ? '我在听…说完松手' : pending ? '同桌在想…' : busy ? '同桌正在说…' : hint}
+        {holding
+          ? '我在听…说完松手'
+          : pending && !speaking
+            ? '同桌在想…'
+            : talking
+              ? '同桌在说 —— 按住可以直接打断'
+              : hint}
       </div>
 
       {/* 点一下麦克风，或点这里 —— 同一个面板 */}

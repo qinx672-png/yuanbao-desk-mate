@@ -1,6 +1,17 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
-import type { Bubble, ScriptNode, Stage, GuideDepth, ExitOption, FallbackLoopStep } from '@/types'
+import { useEffect, useRef, useState, useCallback, type ComponentType } from 'react'
+import type {
+  Bubble,
+  ScriptNode,
+  Stage,
+  GuideDepth,
+  ExitOption,
+  FallbackLoopStep,
+  LabKind,
+  TutorSnapshot,
+} from '@/types'
+import VoltmeterLab from '@/components/lab/VoltmeterLab'
 import {
+  TONGZHUO_NAME,
   script,
   answerChoices,
   stageMetas,
@@ -11,12 +22,24 @@ import {
   noErrorChallengeReply,
   exitOptions,
   interestContexts,
+  BACK_TO_CALLER,
 } from '@/data/mockData'
 import { moodFromBubbleKind, findRole, type ClassmateMood } from '@/components/common/ClassmateAvatar'
 import ClassmateAvatarV2 from '@/components/common/ClassmateAvatarV2'
 import PhotoUpload from '@/screens/student/PhotoUpload'
-import { IconBook, IconClock, IconMic, IconCamera, IconPencil, IconCheck, IconSpark, IconShield } from '@/components/common/Icons'
-import { useListening, wait } from '@/hooks/useSpeech'
+import {
+  IconBook,
+  IconClock,
+  IconMic,
+  IconCamera,
+  IconPencil,
+  IconCheck,
+  IconSpark,
+  IconShield,
+  IconSound,
+  IconSoundOff,
+} from '@/components/common/Icons'
+import { useSpeech, useListening, wait } from '@/hooks/useSpeech'
 
 /**
  * 屏05 · 数字同桌启发式引导（阶段 2-5）
@@ -57,12 +80,52 @@ interface Props {
   roleId: string
   depth: GuideDepth
   onDepthChange: (d: GuideDepth) => void
-  onFinish: (r: { mastered: boolean; exited?: boolean }) => void
+  /**
+   * 这一场结束。
+   *
+   * `seconds` / `turns` 是**真的**，由 TutorFlow 自己测出来 ——
+   * 结算页上「本次学习记录」那一栏写的每个数都得是这一场真发生的，
+   * 不能拿 mockData 里的固定值顶上：学生聊了 40 秒就退出，
+   * 结算页却写「学习时长 15 分钟」，那是编。
+   */
+  onFinish: (r: {
+    mastered: boolean
+    exited?: boolean
+    seconds: number
+    turns: number
+    /** 这一场真正走过的步骤名（去重，按走过顺序） */
+    visited: string[]
+    /**
+     * 孩子在这一场里**抓到并纠正**的 AI 讲解错误数。
+     *
+     * 只数真的埋了错、又被学生指出来的那几处（node.error 存在 + 学生点过质疑）。
+     * 学生质疑错了（那一步 AI 其实没问题）**不计入** —— AI 站得住不算「纠正」，
+     * 把它算进来等于夸大了孩子的功劳，家长端那个数字就成了假的。
+     */
+    caught: number
+  }) => void
   /** 拍照浮层当前开着哪种模式（null = 没开）。浮层状态在上层，因为顶栏也要跟着变 */
   shoot: ShootKind | null
   onShoot: (k: ShootKind | null) => void
   /** 拍了新题：交给上层走诊断流程；这道题的进度已存成断点 */
   onShootNew: () => void
+  /**
+   * 从哪个节点开始（不给就从 p2-probe 起）。
+   *
+   * 只为演示和验收用 —— 走完整条链路要点七八步，
+   * 改一次实验台就要走一遍，没法迭代。真机上不该有这个东西：
+   * 学生从哪儿进入辅导是由诊断结果决定的，不是由参数决定的。
+   */
+  startAt?: string
+  /**
+   * 上次离开时留下的断点（没有就别传）。
+   *
+   * 传进来就是**续学**：本子恢复成离开时的样子，停在哪一步就摆回哪一步，
+   * 不从头问、也不重放那些学生已经看过的话。
+   */
+  snapshot?: TutorSnapshot | null
+  /** 学生选择离开时，把当前进度交上去存着（存哪儿由上层决定） */
+  onSaveProgress: (s: TutorSnapshot) => void
 }
 
 type ShootKind = 'newProblem' | 'myWork'
@@ -78,7 +141,46 @@ const VIA_HEAD: Record<AnswerVia, string> = {
   photo: '看到你的草稿了。这道题你选的是：',
 }
 
-const TYPE_DELAY = 520
+/**
+ * 一句话念完之后、下一句开口之前的换气时间。
+ *
+ * ⚠️ 这里原来叫 TYPE_DELAY = 520，是「每句话固定等 520 毫秒」——
+ * 一个节奏推完全程：三个字的口诀和四十个字的讲解一样长，
+ * 而且**全程没有声音**。同桌是「数字同桌」，却不说话。
+ * 现在改成：先念，念完停这一下，再念下一句。节奏跟着话的长短走。
+ */
+const BREATH_MS = 320
+
+/**
+ * 哪些气泡是「同桌真的说出口的话」—— 只有这些才进语音。
+ *
+ * ⚠️ 2026-09-14 修：原来是「队列里有什么就念什么」，于是三类**界面文案**
+ * 也被当台词念了：
+ *   · sensing —— 教研备注，界面上渲染成「同学的小心思」，但内容全是写给
+ *     设计者看的（「递台阶，不催促：这一步不考故障判断」「对应课标『推理论证』」），
+ *     学生听到的是一句莫名其妙的教研话
+ *   · system  —— 系统提示（「本次掌握状态：已掌握」）
+ *   · cite    —— 教材出处卡（「本题考纲落点：【人教版…】」）
+ * 另外 student（学生自己写的字，渲染成「你写的」）也不该念 ——
+ * 用同桌的音色念学生自己的话，怎么听怎么怪。
+ *
+ * 这条 bug 还被语音的「缺句自动上报」洗白过：前端念不到就上报，上报就被
+ * 当成「待补台词」合成 —— 6 条教研备注因此真的被渲染成了音频。
+ * **所以过滤必须加在念之前**，否则补渲染只会把错误固化下来。
+ */
+const SPEAKABLE = new Set<Bubble['kind']>(['ai', 'praise'])
+
+/**
+ * 不朗读的气泡（界面文案）停留多久 —— 按字数给，不按固定值。
+ *
+ * 理由和 BREATH_MS 那条一样：固定值会让 4 个字的 chip 和 35 个字的旁注
+ * 一样长，短的拖沓、长的来不及看。这里给的是「扫一眼」的节奏，
+ * 比朗读快得多（朗读约 68ms/字，这里 45ms/字），下限 400ms、上限 1.8s。
+ *
+ * ⚠️ 这是**止血值，不是终态**：这些文字的真正问题是「写给了设计者看，
+ * 却摆在学生页上」，那要改内容（或干脆不显示），不是调时长能解决的。
+ */
+const silentMsFor = (text: string) => Math.min(400 + text.length * 45, 1800)
 
 /**
  * 开口的句式脚手架 —— 只教「怎么开口」，不含任何学科内容。
@@ -90,7 +192,47 @@ const TYPE_DELAY = 520
  */
 const EXPRESS_STARTERS = ['我觉得是……，因为……', '我先看到……，所以猜……', '我不太确定，但我想……']
 
-export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoot, onShoot, onShootNew }: Props) {
+/**
+ * 这一档给不给「开口句式」—— 三档差异化的第二个着力点（2026-09-14 加）。
+ *
+ * 判断依据是各档**自己声明过的** `probeDensity`，不是新发明一条规则：
+ *   · 深聊「全程追问」→ **不给**。它承诺的是「一步都不替你走」，
+ *     而句式卡就是把话头替学生起了 —— 那是半步。
+ *   · 标准「关键处追问」/ 快讲「不追问」→ 给。这两档本来就愿意给扶手。
+ *
+ * ⚠️ 「问小一点」**不**受这条管，两档都有。
+ * 它降的是问题的**粒度**，不是替学生**答**；深聊自己的定义里就写着
+ * 「学生答不上来就把问题问小」。砍掉它深聊会变成死胡同。
+ *
+ * 为什么不用 rewrite 表做这件事：那是**换内容**，一个节点换一个节点。
+ * 这条改的是**给不给扶手**，同一份内容、同一句话，只是帮不帮开头。
+ * 硬塞进 rewrite 表要复制一遍全部 express 节点，改一处文案就得改两处。
+ */
+const givesStarter = (d: GuideDepth) => modeOf(d).strategy.probeDensity !== '全程追问'
+
+/**
+ * 实验台注册表 —— 节点只声明「这一步用哪个实验台」，具体长什么样在这儿查。
+ *
+ * 和 teachingModes「教法插件」同一个思路：本文件不认识任何**具体**的实验台，
+ * 只认识「这个节点有个 lab 要渲染」。以后加第二个实验台（力学斜面、化学滴定……），
+ * 在这里加一行、在 LabKind 里加一个 key 就行，下面的渲染逻辑一行都不用改。
+ */
+const LABS: Record<LabKind, ComponentType<{ onDone: () => void }>> = {
+  voltmeter: VoltmeterLab,
+}
+
+export default function TutorFlow({
+  roleId,
+  depth,
+  onDepthChange,
+  onFinish,
+  shoot,
+  onShoot,
+  onShootNew,
+  startAt,
+  snapshot,
+  onSaveProgress,
+}: Props) {
   const role = findRole(roleId)
   const [history, setHistory] = useState<Bubble[]>([])
   const [queue, setQueue] = useState<Bubble[]>([])
@@ -104,7 +246,20 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
   const [studentSays, setStudentSays] = useState('')
   const [showDepth, setShowDepth] = useState(false)
   const [showExit, setShowExit] = useState(false)
-  const [challenged, setChallenged] = useState(false)
+  /**
+   * 「我觉得讲错了」用过没有 —— **按节点记**，不是一个全局开关。
+   *
+   * 原来是个布尔量：整个挂载周期只能用一次，用过就永久变灰。
+   * 问题是这个按钮就贴在右下角最显眼处，讲别的内容时手一滑就消耗掉了；
+   * 等真走到埋错的那一步（全流程唯一一处 node.error）想演示
+   * 「AI 讲错了，学生能当场质疑」，按钮已经点不动 ——
+   * 招牌能力恰好在该展示的那一步展示不了。
+   *
+   * 改成按节点记：每一步都有自己的一次机会，误触的代价降到最小。
+   */
+  const [challengedAt, setChallengedAt] = useState<Set<string>>(() => new Set())
+  /** 这一步用没用过「我觉得讲错了」 */
+  const challenged = challengedAt.has(node.id)
   const [answerVia, setAnswerVia] = useState<AnswerVia>('type')
   /**
    * 脚手架展开到第几层（0 = 没展开）。
@@ -118,50 +273,188 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
   /* ── 语音：说 / 点 / 写 三条等价通道里的第一条（复用已有语音层） ── */
   const { listen } = useListening()
   const [listening, setListening] = useState(false)
+  /* 同桌的声音。原型的辅导端**一句都没出过声** —— 这是这次补上的 */
+  const { speak, stop, muted, setMuted, canSpeak } = useSpeech()
   /** 这句是真听懂的还是原型模拟的 —— 界面如实标出来，不装作真听懂了 */
   const [heard, setHeard] = useState<'real' | 'mock' | null>(null)
   /** 「不知道怎么说」面板：句式脚手架 + 问小一点 */
   const [helperOpen, setHelperOpen] = useState(false)
+  /** 题干条展不展开（默认收起，见顶栏那段注释） */
+  const [showProblem, setShowProblem] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
 
   /** 档位改写：同一份内容换讲法（快讲 → 跳过苏格拉底链，直接结论＋验证题） */
   const resolveId = useCallback((id: string, d: GuideDepth) => modeOf(d).rewrite[id] ?? id, [])
 
+  /**
+   * 热身题是从哪一步岔出去的。
+   *
+   * 用 ref 不用 state：它只在「回到那一步」的那一刻被读一次，
+   * 不需要触发重渲染；放 state 只会让 enter 多背一个依赖。
+   */
+  const warmupFromRef = useRef<string | null>(null)
+
+  /**
+   * 当前停在哪一步 —— 存的是**改写之前的原脚本 id**。
+   *
+   * ⚠️ 2026-09-14 修：切档原来是 `enter(node.id, d)`，而 `node` 存的是
+   * **resolveId 之后**的节点。于是同一趟走下来被解析了两次：
+   *   resolveId('p2-fast', '标准') → 标准的 rewrite 表里没有 'p2-fast'
+   *   → `?? id` 原样返回 'p2-fast' → **人卡在快讲那一页，切不出去**。
+   * 反向也一样：从标准的 p2-teach-direct 切深聊，深聊 rewrite 是空表，
+   * 永远回不到彩灯版。
+   *
+   * 记着原 id，切档才有得可切 —— 而且语义正好对：
+   * 「原 id」就是**当初从哪一步岔出去的**。从快讲切回标准，
+   * 因为快讲是抄近路、没有对应的「标准版节点」，就退回分岔点重讲这一段
+   * （本子上的历史不动，只重摆当前这一步）。
+   */
+  const baseIdRef = useRef<string>('p2-probe')
+
+  /** 这一场从什么时候开始的 —— 结算页的「学习时长」得自己测，不能编 */
+  const startedAtRef = useRef(performance.now())
+
+  /**
+   * 学生这一场**真的走过**哪几步（存人话名字）。
+   *
+   * 结算页「这趟你已经拿到了」原来读的是 mockData 里写死的两条断言
+   * （「弄清了电压为 0 代表元件正常」…）。学生第一步就退出，
+   * 结算页照样说他弄明白了这两件事 —— 又是一次「把假设当事实」。
+   * 现在改成按实际走过的步骤列，一步没走就一条都不列。
+   */
+  const visitedRef = useRef<string[]>([])
+
+  /** 记一笔「这一步他走过了」。同一步重复进（热身回到原处）只记一次 */
+  const noteVisit = (n: ScriptNode) => {
+    const label = n.title ?? n.id
+    if (!visitedRef.current.includes(label)) visitedRef.current.push(label)
+  }
+
+  /** 换一步时要清掉的界面状态。抽出来是因为「回到上一步」也得清同一批 */
+  const resetStepUi = useCallback(() => {
+    setScaffoldStep(0) // 换节点必须收起脚手架，否则上一步的小问题会串到下一步
+    setFreeOpen(false)
+    setHelperOpen(false)
+    setHeard(null)
+    setDraft('')
+  }, [])
+
   const enter = useCallback(
-    (id: string, d: GuideDepth = depth) => {
+    (
+      id: string,
+      d: GuideDepth = depth,
+      /** 上一步的选项托带的「同桌接一句」，排在新节点内容前面。见 ChatOption.reply */
+      reply?: Bubble[],
+    ) => {
+      /*
+       * 哨兵：从热身题**回到岔出去的那一步**。
+       *
+       * 「刚才那一页是哪一页」只有运行时才知道，写不进静态脚本 ——
+       * 所以脚本里留个 '@back'，在这儿拦下来换成真实节点。
+       *
+       * 和普通 enter 的区别：**不重放那一步的气泡**。
+       * 学生刚才就在那一页上，本子里已经写着那些话；再念一遍
+       * 反而会让他以为自己被送回了更早的地方。
+       * 这里只把节点摆回来，那个问题原样等着他答。
+       */
+      if (id === BACK_TO_CALLER) {
+        const back = warmupFromRef.current ?? 'p2-step2'
+        baseIdRef.current = back
+        setNode(script[resolveId(back, d)])
+        resetStepUi()
+        setQueue([])
+        return
+      }
+      baseIdRef.current = id // 切档要用它重新解析，见 baseIdRef 的注释
       const n = script[resolveId(id, d)]
       setNode(n)
-      setScaffoldStep(0) // 换节点必须收起脚手架，否则上一步的小问题会串到下一步
-      setFreeOpen(false)
-      setHelperOpen(false)
-      setHeard(null)
-      setDraft('')
+      noteVisit(n)
+      resetStepUi()
       const bubbles: Bubble[] = n.sensing ? [{ kind: 'sensing', text: n.sensing }, ...n.bubbles] : [...n.bubbles]
-      setQueue(bubbles)
+      /*
+       * reply 排在最前面：先回应学生刚点的那一下，再进新内容。
+       * 没有 reply 时行为和以前**逐字节相同**（bubbles 原样），
+       * 所以合并节点这件事不会碰到任何其他路径。
+       */
+      setQueue(reply?.length ? [...reply, ...bubbles] : bubbles)
     },
-    [depth, resolveId],
+    [depth, resolveId, resetStepUi],
   )
 
   useEffect(() => {
     if (entered) return
     setEntered(true)
-    enter('p2-probe')
+    /*
+     * 有断点就是**续学**：本子恢复成离开时的样子，人摆回停下的那一步，
+     * 已经说过的话一个字都不重念。没有断点才从头起。
+     *
+     * queue 置空是有意的 —— 续学时没有「同桌正在说」的过程，
+     * 该说的上次已经说完了。
+     */
+    if (snapshot) {
+      setHistory(snapshot.history)
+      const n = script[resolveId(snapshot.nodeId, depth)]
+      setNode(n)
+      noteVisit(n) // 续学：停下时那一步也算走过
+      setQueue([])
+    } else {
+      enter(startAt ?? 'p2-probe')
+    }
+    /* startAt / snapshot 不进依赖：它们只在挂载那一刻起作用。
+       中途换起始节点或换断点，必须靠上层的 key 重新挂载，
+       否则会和已经聊过的历史打架 */
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entered, enter])
 
-  /* 数字同学在说话中 */
+  /**
+   * 数字同学在说话中 —— **念完一句再推进下一句**。
+   *
+   * ── 改动前是什么样 ──────────────────────────────────────
+   * 每句话固定等 520 毫秒就冒出来，全程没有声音。
+   * 「数字同桌」不说话，只在本子上刷字 —— 这是这个原型最大的形态缺口。
+   *
+   * ── 两个刻意的选择 ──────────────────────────────────────
+   * ① **先写进本子，再开口念**。学生能边听边看；语音万一没出来
+   *    （浏览器没中文语音 / 被拦截），字已经在纸上了，流程不会卡死。
+   * ② 用 speakGenRef 而不是 effect 的 cleanup 来作废。
+   *    因为 queue 一变（slice 之后）effect 就会重跑，
+   *    若用 cleanup 收尾，会把**刚开口的那句**当场掐掉，
+   *    变成每句话都只说半句。用代次号判断，就只在真正换节点时作废。
+   */
+  const speakGenRef = useRef(0)
+  /**
+   * 已经念过的那一条（比对象身份，不是比文字 —— 脚本里本来就有重复句）。
+   *
+   * 为什么需要它：`speak` 的身份跟着 muted 变，学生中途点一下静音，
+   * 这个 effect 就会重跑一次。没有这道闸，同一句话会被写进本子两遍。
+   * 有闸的话直接跳过，在飞的那次 await 会照常把队列推进下去。
+   */
+  const spokenRef = useRef<Bubble | null>(null)
+
   useEffect(() => {
     if (queue.length === 0) {
       setMood('listening')
       return
     }
-    setMood(moodFromBubbleKind(queue[0].kind))
-    const t = setTimeout(() => {
-      const cur = queue[0]
+    const cur = queue[0]
+    setMood(moodFromBubbleKind(cur.kind))
+    if (spokenRef.current === cur) return
+    spokenRef.current = cur
+    const gen = ++speakGenRef.current
+    const run = async () => {
       setHistory(h => [...h, cur])
+      // 该念的才念；界面文案只显示、不出声（见 SPEAKABLE）
+      await (SPEAKABLE.has(cur.kind) ? speak(cur.text) : wait(silentMsFor(cur.text)))
+      if (speakGenRef.current !== gen) return // 期间换了节点 / 学生退出了
+      await wait(BREATH_MS)
+      if (speakGenRef.current !== gen) return
       setQueue(q => q.slice(1))
-    }, TYPE_DELAY)
-    return () => clearTimeout(t)
-  }, [queue])
+    }
+    void run()
+  }, [queue, speak])
+
+  /* 离开这一屏就别再念了 */
+  useEffect(() => () => stop(), [stop])
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -180,14 +473,14 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
     setTimeout(() => setStudentSays(''), 1400)
   }
 
-  const pick = (label: string, next: string, echo?: string) => {
+  const pick = (label: string, next: string, echo?: string, reply?: Bubble[]) => {
     writeStudent(echo ?? label)
     setMood('thinking')
     if (next === 'timer') {
       setMode('timer')
       return
     }
-    enter(next)
+    enter(next, depth, reply)
   }
 
   const submitInput = () => {
@@ -238,6 +531,10 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
 
   /**
    * 切换引导深度：立刻用新档位重讲当前这一步，不用回退重来。
+   *
+   * ⚠️ 传的是 baseIdRef（**原脚本 id**），不是 node.id。
+   * node.id 已经被上一档改写过了，再解析一次会被 `?? id` 原样返回，
+   * 结果是「切了档，页面纹丝不动」。完整推导见 baseIdRef 的注释。
    */
   const switchDepth = (d: GuideDepth) => {
     setShowDepth(false)
@@ -245,7 +542,7 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
     onDepthChange(d)
     const m = modeOf(d)
     setHistory(h => [...h, { kind: 'system', text: `已切换到【${d}】· ${m.desc}` }])
-    enter(node.id, d)
+    enter(baseIdRef.current, d)
   }
 
   /**
@@ -260,7 +557,7 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
    */
   const challenge = () => {
     if (challenged) return
-    setChallenged(true)
+    setChallengedAt(s => new Set(s).add(node.id))
     setMood('thinking')
     const steps: FallbackLoopStep[] = node.error
       ? fallbackLoopFor(node.error.quote, node.error.fix)
@@ -274,16 +571,76 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
     ])
   }
 
-  /** 体面退出：不追问原因，不留「未完成」标记 */
+  /** 停下的那一步的人话名字。脚本没写 title 就退回一句通用的，不留空白 */
+  const nodeTitle = node.title ?? '上次停下的那一步'
+
+  /**
+   * 收尾统一走这儿：把这一场**真实发生**的数据一起交上去。
+   *
+   * turns 数的是学生实际回答了几轮 —— 不是脚本里排了几步。
+   * 结算页要写「引导轮次 N 轮」，那个 N 必须是他真答的轮数。
+   */
+  const finish = (r: { mastered: boolean; exited?: boolean }) =>
+    onFinish({
+      ...r,
+      seconds: Math.round((performance.now() - startedAtRef.current) / 1000),
+      turns: history.filter(b => b.kind === 'student').length,
+      visited: [...visitedRef.current],
+      // 从过程算，不在数据层写死 —— 和 visited 一个道理（见 mockData 里
+      // exitSummary.gained 被删掉的那条注释：任何「学生的收获」都不能预置）
+      caught: [...challengedAt].filter(id => script[id]?.error).length,
+    })
+
+  /**
+   * 体面退出：不追问原因，不留「未完成」标记。
+   *
+   * ── 三条路都会留下续学点 ──────────────────────────────
+   * `save` 和 `pause` 的区别**只在要不要当面承诺**：
+   *   · save  —— 明说「存好了，下次从这一步接着问」
+   *   · pause —— 嘴上只说「位置我记着」，不逼他承诺下次还来
+   * 两条都真的存。这不是我加的戏：家长端和成长档案里四处写着
+   * 「选择『今天先放一放』，第二天自己从断点续上」，
+   * 6 处文案以前全是假的 —— 学生端根本没存过任何东西。
+   * 与其把那 6 处删掉（那等于把「体面退出」这个差异点一起删了），
+   * 不如让它成真。
+   *
+   * `easier` 不存，也**不动**已经存过的那个 —— 他只是岔去热个身，不是要走。
+   */
   const doExit = (o: ExitOption) => {
     setShowExit(false)
+
     if (o.key === 'easier') {
-      setHistory(h => [...h, { kind: 'student', text: o.label }])
-      setQueue(q => [...q, { kind: 'ai', text: o.reply }])
+      /* 热身是从**当前这一步**岔出去的，热完得回到这儿。
+         已经在热身里就别再套一层，否则连按两次会一路退回更早的页。
+         存 baseIdRef（原 id）：warmupFromRef 最后会被喂给 enter()，
+         喂改写过的 id 会踩和切档同一个坑 */
+      if (baseIdRef.current !== 'p2-warmup' && baseIdRef.current !== 'p2-warmup-hint') {
+        warmupFromRef.current = baseIdRef.current
+      }
+      setHistory(h => [
+        ...h,
+        { kind: 'student', text: o.label },
+        ...(o.reply ? [{ kind: 'ai' as const, text: o.reply }] : []),
+      ])
+      setTimeout(() => enter('p2-warmup'), 700)
       return
     }
-    setHistory(h => [...h, { kind: 'student', text: o.label }, { kind: 'ai', text: o.reply }])
-    setTimeout(() => onFinish({ mastered: false, exited: true }), 700)
+
+    onSaveProgress({
+      nodeId: node.id,
+      title: nodeTitle,
+      /* 连队列里还没念完的话一起收进去 ——
+         否则续学时本子会比学生记忆里短一截 */
+      history: [...history, ...queue, { kind: 'student', text: o.label }],
+    })
+
+    const reply =
+      o.key === 'save'
+        ? `存好了。下次打开，我直接从「${nodeTitle}」这一步接着问你，不用重头讲。`
+        : `好，今天到这儿，不问你为什么。你刚才自己弄明白的那几步都留着 —— 位置我也记着，想回来随时接得上。`
+
+    setHistory(h => [...h, { kind: 'student', text: o.label }, { kind: 'ai', text: reply }])
+    setTimeout(() => finish({ mastered: false, exited: true }), 700)
   }
 
   /**
@@ -314,10 +671,25 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
   ]
 
   const waiting = queue.length > 0
+  /* 节点声明了实验台就查表取组件 —— 查不到 key 会在这里就是 undefined，
+     不会静默渲染出一块空白（LabKind 是联合类型，注册表少写一个键 TS 直接报错） */
+  const LabComp = node.lab ? LABS[node.lab.kind] : null
+  const labNext = node.lab?.next
   const currentStage: Stage = mode === 'timer' || mode === 'answer' ? 3 : node.stage
   const currentInterest = node.interestContext ? interestContexts[node.interestContext] : null
   const mm = String(Math.floor(seconds / 60)).padStart(2, '0')
   const ss = String(seconds % 60).padStart(2, '0')
+
+  /*
+   * 「我卡住了 / 不知道怎么说」这个入口还有没有东西可给。
+   *
+   * 为什么必须判：深聊档不给句式，如果学生又把「问小一点」点完了，
+   * 面板就成**一个空虚线框** —— 点开什么都没有。标准档不会遇到，
+   * 因为句式那一排永远在；深聊会。所以入口本身要跟着一起消失。
+   */
+  const canStarter = givesStarter(depth)
+  const canScaffold = !!node.input?.scaffolds && scaffoldStep < node.input.scaffolds.length
+  const hasHelper = canStarter || canScaffold
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col bg-[#f4f7fb]">
@@ -343,6 +715,43 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
           </div>
           <div className="text-[11.5px] text-ink-400">📚 {diagnosis.knowledgePoint}</div>
         </div>
+
+        {/*
+          题干常驻条 —— 学生答到一半必须能回看原题。
+          原来题干只在诊断屏和拍照屏出现过，一进辅导流程就没了，
+          而脚本里到处在引用题干里的具体数值
+          （「测 L₂ 两端电压等于电源电压」「两只灯都不亮」）——
+          学生记不住就只能瞎猜，那测的就不是推理，是记忆力。
+
+          为什么默认收起而不是全文摊开：这是手机形状的屏，题干全文三行
+          要吃掉约六分之一高度，一直摊着会把笔记本压扁。
+          收起时留**一行预览**，所以它始终「在」，一点就全开。
+
+          ⚠️ 数据源是 mockData 里的常量 `diagnosis`（同 `knowledgePoint`，
+          见上面那行）。真机上应该是「这道题识别出来的原文」，
+          原型只有一条主线所以写死 —— 和 DEMO_REVIEW_POINT 是同一处妥协。
+        */}
+        <div className="mt-2 rounded-xl bg-white border border-ink-200 overflow-hidden">
+          <button
+            onClick={() => setShowProblem(o => !o)}
+            className="tap w-full px-3 py-2 flex items-center gap-2 text-left"
+          >
+            <span className="text-[11px] font-bold text-ink-400 shrink-0 tracking-wide">题干</span>
+            {!showProblem && (
+              <span className="text-[12px] text-ink-600 truncate flex-1 min-w-0">
+                {diagnosis.ocrText.split('\n')[0]}
+              </span>
+            )}
+            <span className="ml-auto shrink-0 text-[11px] font-bold text-brand-600">
+              {showProblem ? '收起' : '展开'}
+            </span>
+          </button>
+          {showProblem && (
+            <p className="px-3 pb-2.5 text-[12.5px] text-ink-800 leading-[1.85] whitespace-pre-line">
+              {diagnosis.ocrText}
+            </p>
+          )}
+        </div>
       </div>
 
       {/* 数字同桌形象区（常驻，不是聊天头像）+ 引导深度切换 */}
@@ -359,17 +768,37 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
-              <span className="text-[15px] font-bold text-ink-900">你的同桌 · {role.name}</span>
+              <span className="text-[15px] font-bold text-ink-900">你的同桌 · {TONGZHUO_NAME}</span>
               <span className="chip bg-brand-50 text-brand-700 text-[10.5px]">{role.style}</span>
             </div>
             <div className="text-[12px] text-ink-500 mt-0.5 truncate">
               {waiting
-                ? '正在写笔记给你看…'
+                ? muted
+                  ? '正在写笔记给你看…'
+                  : '正在讲给你听…'
                 : studentSays
                   ? `我在看你写的「${studentSays}」`
                   : '把你不会的题拿过来，我们一起想明白'}
             </div>
           </div>
+
+          {/*
+            静音开关。辅导端原来没有 —— 但面试现场、投影、图书馆
+            都需要能当场关掉声音，否则演示时要么吵到别人，
+            要么得去系统音量里找。放这儿：一眼看得见、一下点得到。
+            文案只留图标，省下的横向空间给上面的名字。
+          */}
+          <button
+            onClick={() => setMuted(m => !m)}
+            aria-label={muted ? '打开同桌的声音' : '静音'}
+            title={muted ? '打开同桌的声音' : canSpeak ? '静音' : '这台机器放不出声，只能看字幕'}
+            className={`tap shrink-0 w-8 h-8 rounded-xl border flex items-center justify-center ${
+              muted ? 'bg-ink-50 border-ink-200 text-ink-400' : 'bg-white border-brand-200 text-brand-700'
+            }`}
+          >
+            {muted ? <IconSoundOff className="w-4 h-4" /> : <IconSound className="w-4 h-4" />}
+          </button>
+
           <button
             onClick={() => setShowDepth(true)}
             className="tap shrink-0 rounded-xl bg-white border border-brand-200 px-2.5 text-[12px] font-bold text-brand-700"
@@ -422,6 +851,26 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
             )}
           </div>
         </div>
+
+        {/*
+          实验台 —— 节点声明了 lab 就渲染，做完进 node.lab.next。
+          它和 options / input 互斥：一个节点要么让学生说话，要么让他动手，
+          不该同时递给他两件事。所以门槛和那两块一样（chat + 不 waiting）。
+
+          ⚠️ 位置是刻意的：**放可滚动区，不放交互区**。
+          交互区是 shrink-0，而实验台比它能拿到的空间高得多，
+          多出来的部分会被手机框的 overflow-hidden 从底部裁掉 ——
+          第一版就栽在这儿，裁掉的正好是「猜读数」那三个按钮。
+          于是整个实验台像坏了一样：按钮点不到，表也拖不动
+          （表要猜完才让拖，那是设计不是 bug）。放这儿就能滚。
+        */}
+        {mode === 'chat' && !waiting && LabComp && (
+          <div className="mx-auto max-w-[360px] mt-3">
+            {/* key 用节点 id：换节点必须换一个全新的实验台，
+                否则上一轮拖到一半的位置会被 React 复用过来 */}
+            <LabComp key={node.id} onDone={() => labNext && enter(labNext)} />
+          </div>
+        )}
       </div>
 
       {/* 交互区 */}
@@ -534,7 +983,7 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
             {node.options.map(o => (
               <button
                 key={o.label}
-                onClick={() => pick(o.label, o.next, o.echo)}
+                onClick={() => pick(o.label, o.next, o.echo, o.reply)}
                 className="btn-ghost py-3 text-[15px] justify-start px-4 text-left leading-snug"
               >
                 {o.label}
@@ -639,12 +1088,18 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
                     <IconMic className="w-4 h-4" />
                     {listening ? '我在听…' : '说给同桌'}
                   </button>
-                  <button
-                    onClick={() => setHelperOpen(o => !o)}
-                    className="tap px-3 rounded-xl bg-ink-100 text-ink-700 text-[13px] font-semibold shrink-0"
-                  >
-                    {helperOpen ? '收起' : '不知道怎么说'}
-                  </button>
+                  {/* 深聊不给句式，按钮就不该叫「不知道怎么说」——
+                      那是在承诺一样它不打算给的东西。改说「我卡住了」，
+                      点开后就只剩「问小一点」这一条路。
+                      两条路都走完了就连入口一起撤掉，不留一个点开是空的框 */}
+                  {hasHelper && (
+                    <button
+                      onClick={() => setHelperOpen(o => !o)}
+                      className="tap px-3 rounded-xl bg-ink-100 text-ink-700 text-[13px] font-semibold shrink-0"
+                    >
+                      {helperOpen ? '收起' : canStarter ? '不知道怎么说' : '我卡住了'}
+                    </button>
+                  )}
                 </>
               ) : (
                 <button
@@ -659,9 +1114,12 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
               </button>
             </div>
 
-            {/* 开口面板：给的是句式，不是答案 */}
-            {node.input.channel === 'express' && helperOpen && (
+            {/* 开口面板：给的是句式，不是答案。
+                深聊档不出现句式那一排 —— 详见 givesStarter */}
+            {node.input.channel === 'express' && helperOpen && hasHelper && (
               <div className="mt-2.5 rounded-2xl border border-dashed border-ink-200 bg-[#fffdf5] px-3.5 py-3 animate-fadeUp">
+                {canStarter && (
+                  <>
                 <div className="text-[11px] text-ink-400 mb-1.5">点一句就行 —— 这只是句式，不含答案</div>
                 <div className="flex flex-wrap gap-1.5">
                   {EXPRESS_STARTERS.map((s, i) => (
@@ -676,14 +1134,18 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
                     </button>
                   ))}
                 </div>
-                {/* 另一种卡壳：不是不会说，是根本没想法 —— 那就把问题问小 */}
-                {node.input.scaffolds && scaffoldStep < node.input.scaffolds.length && (
+                  </>
+                )}
+                {/* 另一种卡壳：不是不会说，是根本没想法 —— 那就把问题问小。
+                    这条**两档都有**，深聊也不例外（降粒度 ≠ 代答）。
+                    它上面的间距跟着句式行走：句式行不显示时不能再顶一段空 */}
+                {canScaffold && (
                   <button
                     onClick={() => {
                       setScaffoldStep(s => s + 1)
                       setHelperOpen(false)
                     }}
-                    className="tap w-full mt-2.5 rounded-xl bg-brand-50 border border-brand-100 px-3 py-2 text-left text-[12.5px] font-bold text-brand-700"
+                    className={`tap w-full ${canStarter ? 'mt-2.5' : ''} rounded-xl bg-brand-50 border border-brand-100 px-3 py-2 text-left text-[12.5px] font-bold text-brand-700`}
                   >
                     这个问题太大了，问小一点
                   </button>
@@ -697,7 +1159,7 @@ export default function TutorFlow({ roleId, depth, onDepthChange, onFinish, shoo
         {mode === 'chat' && !waiting && node.finish && (
           <button
             className="btn-primary py-3.5 text-[16px] animate-fadeUp"
-            onClick={() => onFinish({ mastered: node.id === 'p5-mastered' })}
+            onClick={() => finish({ mastered: node.id === 'p5-mastered' })}
           >
             看看这次学到了什么
           </button>

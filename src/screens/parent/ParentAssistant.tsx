@@ -1,16 +1,31 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { AssistantQuickAsk } from '@/types'
 import { assistantThread, assistantQuickAsks, student } from '@/data/mockData'
-import { IconShield, IconSpark, IconArrowRight } from '@/components/common/Icons'
+import { IconShield, IconSpark, IconArrowRight, IconSound, IconSoundOff, IconMic } from '@/components/common/Icons'
+import { useSpeech, useListening, wait } from '@/hooks/useSpeech'
 
 /**
  * 屏 · 家长专属 AI 助手（定位说明 3.6）
  *
- * ── 这一屏为什么不做语音 ────────────────────────────────────
- * 学生端首页是「本子 + 麦克风」，因为语音在替孩子降低表达门槛。
- * 家长端恰恰相反：家长多半在办公室或通勤路上，问的是「这周他电路到底怎么样」
- * 这类要精确答案的问题，打字比说话更准、也更有分寸。
- * **语音是给孩子的能力，不是这个产品的统一形态。**
+ * ── 这一屏的语音边界（2026-09-13 修订，原来写的是「一律不做」）────
+ * 原话是：「家长多半在办公室或通勤路上，问的是要精确答案的问题，
+ * 打字比说话更准、也更有分寸 —— **语音是给孩子的能力，不是统一形态**。」
+ *
+ * 这段话一半对一半错，所以是收窄，不是推翻：
+ *   · **对的那半**：周报、薄弱点、趋势图那些**报表页**不念。那些是精确数据
+ *     （「L₂ 断路 4 次」「掌握度 62%」），念出来听岔了没法回看，语音是负分。
+ *     那几屏至今一句语音都没有，这条继续成立。
+ *   · **错的那半**：把「家长」当成一个统一场景。这一屏是**对话**，
+ *     而家长真在通勤路上时，他**根本没法打字** —— 那恰恰是语音该上场的地方。
+ *     所以「家长端不开口」这个结论下大了，该收成「报表不念，对话可以开口」。
+ *
+ * 现状：助手的回复会念出来，也可以按住麦克风直接问。
+ * 语音仍然只是**多给一条通道**，打字和点选一直是等价的、一直都在。
+ *
+ * ── 为什么不把历史记录一起念出来 ─────────────────────────────
+ * 进这一屏时已有十几条旧消息。全念等于强迫家长听一分半钟独白，
+ * 而且他大概率已经读过了。**只念「你刚问出来的那条」** ——
+ * 语音回答的是「你刚刚问的那件事」，不是「这个页面有什么」。
  *
  * ── 这一屏的灵魂不是「能问」，是「有一件事它不给」──────────
  * 家长问「他跟你聊的时候说过不想学吗？原话给我看看」——
@@ -23,9 +38,17 @@ import { IconShield, IconSpark, IconArrowRight } from '@/components/common/Icons
  * 原型里打字提问走的是关键词匹配（见 answerFor），答不上来时如实说
  * 「原型里我只准备了下面这几个问题」，不编一个像模像样的回答糊过去。
  * 真实实现由 LLM 基于学情数据作答。
+ * 语音识别（STT）在国内浏览器上常常不可用，用不了时**如实标注**
+ * 「原型模拟识别」，不装作真听懂了。
  */
 
-type Msg = { from: 'ai' | 'parent'; text: string; source?: string }
+type Msg = {
+  from: 'ai' | 'parent'
+  text: string
+  source?: string
+  /** 家长那句其实是原型模拟的（STT 用不了时的兜底）—— 界面上如实标出来 */
+  simulated?: boolean
+}
 
 /**
  * 原型：主题词命中。真跑由 LLM 基于学情数据回答。
@@ -60,37 +83,87 @@ export default function ParentAssistant() {
   const [msgs, setMsgs] = useState<Msg[]>(assistantThread.map(m => ({ ...m })))
   const [draft, setDraft] = useState('')
   const [pending, setPending] = useState(false)
+  /** 语音识别在不在。不在时麦克风照按，但要如实标「原型模拟识别」 */
+  const [listening, setListening] = useState(false)
+
+  const { speak, stop, muted, setMuted, canSpeak } = useSpeech()
+  const { listen, sttAvailable } = useListening()
 
   const scrollRef = useRef<HTMLDivElement>(null)
-  const timer = useRef(0)
+  /**
+   * 代次号：家长连着问、或者问到一半又按了麦克风时，
+   * 用它把在飞的那一轮作废 —— 否则两条回复会前后脚冒出来。
+   */
+  const runRef = useRef(0)
+  const simIdx = useRef(0)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
   }, [msgs, pending])
 
-  useEffect(() => () => clearTimeout(timer.current), [])
+  useEffect(
+    () => () => {
+      runRef.current++
+      stop()
+    },
+    [stop],
+  )
 
-  const ask = (q: string) => {
-    const text = q.trim()
-    if (!text || pending) return
-    setDraft('')
-    setMsgs(m => [...m, { from: 'parent', text }])
-    setPending(true)
-    timer.current = window.setTimeout(() => {
+  /**
+   * 问一句。assistant 的回答会**念出来** —— 家长在开车/通勤时看不了屏幕。
+   *
+   * 打断：说话期间再问一句，会把上一句掐掉再答新的。
+   * 对话不是单向广播，这一点在家长端和学生端是同一条规矩。
+   */
+  const ask = useCallback(
+    async (q: string, simulated = false) => {
+      const text = q.trim()
+      if (!text) return
+      runRef.current++
+      stop() // 上一句还没念完就掐掉
+      const id = runRef.current
+
+      setDraft('')
+      setMsgs(m => [...m, { from: 'parent', text, simulated }])
+      setPending(true)
+
+      // 「正在查学情数据」的停顿。跟学生端同一个节奏：先让家长看见它在想
+      await wait(900)
+      if (runRef.current !== id) return // 期间又问了新的
+
       const a = answerFor(text)
-      setMsgs(m => [
-        ...m,
-        a
-          ? { from: 'ai', text: a.text, source: a.source }
-          : {
-              from: 'ai',
-              text: '这个问题原型里我答不上来 —— 我只准备了学情、教育方法、边界这三类。真实产品里我会基于学情数据回答，答不了的会直接说答不了。',
-              source: '诚实说明：原型未接入真实模型',
-            },
-      ])
-      setPending(false)
-    }, 900)
-  }
+      const reply: Msg = a
+        ? { from: 'ai', text: a.text, source: a.source }
+        : {
+            from: 'ai',
+            text: '这个问题原型里我答不上来 —— 我只准备了学情、教育方法、边界这三类。真实产品里我会基于学情数据回答，答不了的会直接说答不了。',
+            source: '诚实说明：原型未接入真实模型',
+          }
+      setMsgs(m => [...m, reply])
+      setPending(false) // 先停掉「正在输入」的三个点，再开口
+      await speak(reply.text)
+    },
+    [speak, stop],
+  )
+
+  /**
+   * 按住麦克风问。
+   *
+   * STT 不可用时**不假装听懂了** —— 拿预设问题顶上，并打上
+   * 「原型模拟识别」。界面必须说清楚哪句是真的听来的。
+   */
+  const askByVoice = useCallback(async () => {
+    if (listening) return
+    setListening(true)
+    try {
+      const chips = assistantQuickAsks.filter(a => a.chip)
+      const canned = chips[simIdx.current++ % Math.max(chips.length, 1)]?.label ?? '他最近状态怎么样'
+      const r = await listen(canned)
+      await ask(r.text || canned, !r.real)
+    } finally {
+      setListening(false)
+    }
+  }, [ask, listen, listening])
 
   return (
     <div className="flex-1 min-h-0 flex flex-col bg-ink-50">
@@ -99,6 +172,20 @@ export default function ParentAssistant() {
         <div className="flex items-center gap-2">
           <IconShield className="w-4 h-4 text-white/70 shrink-0" />
           <span className="text-[13px] font-semibold text-white">{student.name}的学习助手</span>
+          {/*
+            静音开关。家长在会议室、在车上外放、或者孩子就在旁边 ——
+            都得能当场关掉声音，不能逼他去翻系统音量。
+          */}
+          <button
+            onClick={() => setMuted(m => !m)}
+            aria-label={muted ? '打开语音' : '静音'}
+            title={muted ? '打开语音' : canSpeak ? '静音' : '这台机器放不出声，只能看文字'}
+            className={`tap ml-auto shrink-0 w-7 h-7 rounded-lg flex items-center justify-center transition ${
+              muted ? 'bg-white/10 text-white/50' : 'bg-white/15 text-white'
+            }`}
+          >
+            {muted ? <IconSoundOff className="w-3.5 h-3.5" /> : <IconSound className="w-3.5 h-3.5" />}
+          </button>
         </div>
         <p className="text-[11.5px] text-white/60 leading-relaxed mt-1">
           我基于学情数据回答，也会说不。孩子和同桌的对话原文不会出现在这里 —— 那是他愿意说实话的前提。
@@ -132,7 +219,7 @@ export default function ParentAssistant() {
           {assistantQuickAsks.filter(a => a.chip).map(a => (
             <button
               key={a.label}
-              onClick={() => ask(a.label)}
+              onClick={() => void ask(a.label)}
               disabled={pending}
               className="tap shrink-0 rounded-full border border-ink-200 bg-white px-3 text-[12.5px] text-ink-700 hover:border-parent-400 hover:text-parent-700 transition disabled:opacity-50"
             >
@@ -142,17 +229,38 @@ export default function ParentAssistant() {
         </div>
 
         <div className="flex items-center gap-2 mt-1">
+          {/*
+            按住问。家长在开车、在做饭、手上没空的时候，打字这条路是断的 ——
+            这是这一屏加语音的唯一理由。
+          */}
+          <button
+            onPointerDown={e => {
+              e.currentTarget.setPointerCapture(e.pointerId)
+              void askByVoice()
+            }}
+            disabled={listening || pending}
+            aria-label="按住说话"
+            title={sttAvailable ? '按住说话' : '这台设备上语音识别不可用 —— 按住会用预设问题演示'}
+            className={`tap shrink-0 w-10 h-10 rounded-xl border flex items-center justify-center transition active:scale-95 ${
+              listening
+                ? 'bg-parent-700 border-parent-700 text-white'
+                : 'bg-white border-ink-200 text-parent-700 disabled:opacity-40'
+            }`}
+          >
+            <IconMic className="w-4 h-4" />
+          </button>
+
           <input
             value={draft}
             onChange={e => setDraft(e.target.value)}
             onKeyDown={e => {
-              if (e.key === 'Enter') ask(draft)
+              if (e.key === 'Enter') void ask(draft)
             }}
-            placeholder="也可以直接问，比如「他最近状态怎么样」"
+            placeholder={listening ? '在听…' : '也可以直接问，比如「他最近状态怎么样」'}
             className="flex-1 min-w-0 rounded-xl border border-ink-200 px-3 py-2.5 text-[13.5px] outline-none focus:border-parent-400"
           />
           <button
-            onClick={() => ask(draft)}
+            onClick={() => void ask(draft)}
             disabled={!draft.trim() || pending}
             className="tap shrink-0 w-10 h-10 rounded-xl bg-parent-700 text-white flex items-center justify-center disabled:bg-ink-200 transition active:scale-95"
             aria-label="发送"
@@ -174,6 +282,8 @@ function Bubble({ m }: { m: Msg }) {
       <div className="flex justify-end">
         <div className="max-w-[78%] rounded-2xl rounded-br-md bg-parent-700 text-white px-3.5 py-2.5 text-[13.5px] leading-relaxed">
           {m.text}
+          {/* 这句不是真听来的 —— 如实标出来，和学生端同一套口径 */}
+          {m.simulated && <span className="text-white/60">（原型模拟识别）</span>}
         </div>
       </div>
     )

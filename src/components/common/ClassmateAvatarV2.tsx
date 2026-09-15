@@ -365,7 +365,7 @@ export default function ClassmateAvatarV2({
   )
 
   return (
-    <div className={className} style={style} aria-label={`数字同桌 ${role.name} · ${mood}`}>
+    <div className={className} style={style} aria-label={`数字同桌 小元 · ${mood}`}>
       <svg width={size} height={size} viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
         <defs>
           <linearGradient id={`bg2-${uid}`} x1="0" y1="0" x2="0" y2="1">

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { GuideDepth, ScreenId, WatchMark, FollowUp } from '@/types'
+import type { GuideDepth, ScreenId, WatchMark, FollowUp, TutorSnapshot } from '@/types'
 import { advance, seedFollowUps, isUnderReview, type ReviewOutcome } from '@/lib/followUp'
 import PhoneFrame from '@/components/shell/PhoneFrame'
 import ScreenNav from '@/components/shell/ScreenNav'
@@ -58,8 +58,58 @@ export default function App() {
   const [showRest, setShowRest] = useState(false)
   const [eyeCare, setEyeCare] = useState(false)
   const [mastered, setMastered] = useState(true)
+
+  /**
+   * 上一次辅导是**走完了**还是**学生主动停下的**。
+   *
+   * SessionSummary 必须知道这件事 —— 两句话术完全不同：
+   * 走完了说「需二次巩固」，主动停下的说「你弄明白了 A 和 B，下次从 C 接着来」。
+   * 以前它只会看 `mastered`，于是学生每次体面退出都被判成「需二次巩固」。
+   * 一个把「可以先停」当卖点的产品，退出结算页却在扣分，自己打自己脸。
+   */
+  const [exitedLast, setExitedLast] = useState(false)
+
+  /**
+   * 这一场真答了几轮、真坐了多久、真走过哪几步 —— 由 TutorFlow 实测，结算页照实写。
+   * `visited` 尤其重要：结算页「这趟你已经拿到了」以前是写死的两条断言，
+   * 学生第一步就退出也照样说他弄明白了那两件事。
+   */
+  const [lastStats, setLastStats] = useState<{
+    seconds: number
+    turns: number
+    visited: string[]
+    /** 最近一次辅导里，孩子抓到并纠正的 AI 讲解错误数（家长端要上报的那个数） */
+    caught: number
+  }>({
+    seconds: 0,
+    turns: 0,
+    visited: [],
+    caught: 0,
+  })
   const [planDecided, setPlanDecided] = useState<'接受' | '暂不调整' | null>(null)
   const [tutorKey, setTutorKey] = useState(0)
+  /** 辅导流程从哪个节点起 —— 只为演示近路，见 TutorFlow 的 startAt */
+  const [tutorStart, setTutorStart] = useState<string | undefined>(undefined)
+
+  /**
+   * ── 断点续学 ──────────────────────────────────────────────────
+   * 学生选「保存进度」或「今天先放一放」时，TutorFlow 把当前进度交上来，
+   * 存在这儿。下次进辅导流程时再喂回去，本子和节点原样恢复。
+   *
+   * 为什么放 App 而不是 TutorFlow 自己存：
+   * TutorFlow 每次进来都是**重新挂载**的（靠 key 强刷），自己存不住；
+   * 而且首页那张「继续上次」卡片也得读它 —— 两屏共用的状态只能挂在上层，
+   * 跟 followUps 一个道理。
+   *
+   * 生命周期（三条，别记错）：
+   *   ① 只在 save / pause 时被**写入**
+   *   ② 只在「重走辅导流程」「拍新题」这类**显式重开**时被清空
+   *   ③ 走完完整流程（非 exited）时清空 —— 都学完了没有断点可言
+   *
+   * 反过来：从「继续上次」进来后中途按返回键走了，断点**不清**。
+   * 它记的就是「最后一次明确保存的位置」，退回上一次保存点不算错。
+   */
+  const [tutorSnapshot, setTutorSnapshot] = useState<TutorSnapshot | null>(null)
   const [roleId, setRoleId] = useState('a2')
   const [guideDepth, setGuideDepth] = useState<GuideDepth>('标准')
 
@@ -124,8 +174,40 @@ export default function App() {
 
   const restartTutor = useCallback(() => {
     setShootMode(null)
+    setTutorStart(undefined) // 重走就得从头走，别继承上一次的跳转点
+    setTutorSnapshot(null) // 显式重开：断点作废，否则会被旧断点半路截胡
     setTutorKey(k => k + 1)
     setScreen('stu-diagnosis')
+  }, [])
+
+  /**
+   * 「继续上次」：带着断点进辅导流程。
+   *
+   * 和 restartTutor 的**唯一区别**就是不清断点、不进诊断屏 ——
+   * 学生上次已经诊断过了，再来一遍「先做道题看看」是装傻。
+   * 靠 key 强刷让 TutorFlow 重新挂载，它会在挂载时读 snapshot 恢复。
+   */
+  const resumeTutor = useCallback(() => {
+    setShootMode(null)
+    setTutorStart(undefined)
+    setTutorKey(k => k + 1)
+    setScreen('stu-tutor')
+  }, [])
+
+  /** 演示要反复走，得能回到「没存过断点」的状态 */
+  const clearTutorSnapshot = useCallback(() => setTutorSnapshot(null), [])
+
+  /**
+   * 直接跳到电压表实验台。
+   *
+   * 同样是演示/验收近路：走完整条链路要点七八步，改一次实验台就要走一遍，
+   * 没法迭代。真机上不该有这个入口 —— 学生从哪一步进入由诊断结果决定。
+   */
+  const jumpToLab = useCallback(() => {
+    setShootMode(null)
+    setTutorStart('p2-lab')
+    setTutorKey(k => k + 1)
+    setScreen('stu-tutor')
   }, [])
 
   /** 手表上按一下「没听懂」：记一条，并让手机端对应的知识点当场亮起来 */
@@ -209,6 +291,8 @@ export default function App() {
             onPhoto={() => go('stu-photo')}
             onStartTask={restartTutor}
             followUps={followUps}
+            snapshot={tutorSnapshot}
+            onResume={resumeTutor}
           />
         )
       case 'stu-photo':
@@ -223,10 +307,23 @@ export default function App() {
             depth={guideDepth}
             onDepthChange={setGuideDepth}
             shoot={shootMode}
+            startAt={tutorStart}
+            snapshot={tutorSnapshot}
+            onSaveProgress={setTutorSnapshot}
             onShoot={setShootMode}
             onShootNew={restartTutor}
             onFinish={r => {
               setMastered(r.mastered)
+              setExitedLast(!!r.exited)
+              setLastStats({ seconds: r.seconds, turns: r.turns, visited: r.visited, caught: r.caught })
+
+              /*
+               * 断点清空规则：**只有走完全程才清**。
+               *
+               * 主动退出（exited）不能清 —— doExit 刚刚才把断点存进来，
+               * 这里一清就等于白存。那次 setTimeout(700) 的顺序是真的会踩到的坑。
+               */
+              if (!r.exited) setTutorSnapshot(null)
 
               /*
                * ── 复查闭环的写回点 ──────────────────────────────
@@ -259,7 +356,18 @@ export default function App() {
           />
         )
       case 'stu-summary':
-        return <SessionSummary mastered={mastered} onGrowth={() => go('stu-growth')} onHome={() => go('stu-home')} />
+        return (
+          <SessionSummary
+            mastered={mastered}
+            exited={exitedLast}
+            snapshot={tutorSnapshot}
+            seconds={lastStats.seconds}
+            turns={lastStats.turns}
+            visited={lastStats.visited}
+            onGrowth={() => go('stu-growth')}
+            onHome={() => go('stu-home')}
+          />
+        )
       case 'stu-growth':
         return <GrowthCenter onOpen={go} followUps={followUps} />
       case 'stu-watch':
@@ -272,7 +380,7 @@ export default function App() {
           />
         )
       case 'par-home':
-        return <ParentHome onOpen={go} planDecided={planDecided} />
+        return <ParentHome onOpen={go} planDecided={planDecided} caught={lastStats.caught} />
       case 'par-weekly':
         return <WeeklyReport onOpen={go} />
       case 'par-weak':
@@ -356,6 +464,10 @@ export default function App() {
             家长端
           </DemoBtn>
           <DemoBtn onClick={restartTutor}>重走辅导流程</DemoBtn>
+          <DemoBtn onClick={jumpToLab}>跳到电压表实验台</DemoBtn>
+          {tutorSnapshot && (
+            <DemoBtn onClick={clearTutorSnapshot}>清掉断点「{tutorSnapshot.title}」</DemoBtn>
+          )}
           {screen === 'stu-watch' && <DemoBtn onClick={resetWatch}>重置手表演示</DemoBtn>}
 
           {/*

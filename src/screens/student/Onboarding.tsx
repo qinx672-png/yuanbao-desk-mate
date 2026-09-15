@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import {
+  TONGZHUO_NAME,
   onboardInterest,
   onboardAvatar,
   quickQuestions,
+  quickGuessPick,
+  quickGuessLine,
   traitUsage,
   profileV0,
   profileTimeline,
@@ -119,7 +122,25 @@ interface Props {
 }
 
 /** 走完一步之后下一步去哪。用显式的 stage，不再用下标硬凑 */
-type Stage = 'interest' | 'quick' | 'avatar'
+type Stage = 'name' | 'interest' | 'quick' | 'avatar'
+
+/**
+ * 同桌的名字来自 mockData 的 TONGZHUO_NAME —— 全局唯一一处，别在这儿再写一遍。
+ *
+ * 以前同桌的名字来自最后一步选的形象（阿橙 / 小蓝 / 豆豆 …），可选形象是
+ * **最后**一步 —— 于是开场那十几秒里它根本没有名字，只能说「我是你的新同桌」。
+ * 第一次见面不报名字、也不问对方名字，直接开始猜你周末干嘛 —— 这是秦肖说
+ * 「太人机」的根子：对话是单向采集，不是互相认识。
+ *
+ * 现在名字固定成小元（和产品名「元宝同桌」同源），形象退成纯外壳。
+ * 学生主页 / 讲题页顶部的那条身份栏也读同一个常量，不会各说各的。
+ */
+
+/** 演示时学生「说」出来的名字。和 mockData 里的 student.name 对齐 */
+const DEMO_STUDENT_NAME = '小明'
+
+/** 名字这步的科学内核（原型可视化用，产品内不展示） */
+const NAME_MEASURES = '互惠式自我暴露：同桌先给出自己（名字 + 喜好），再问学生。单向采集只会让人闭嘴'
 
 const VERDICT_HIT_FIRST = '哟，头一句就蒙对了 —— 不过这回是运气，我手上一点线索都没有。'
 const VERDICT_MISS_FIRST = '猜偏了，正常，我手上一条线索都没有。你纠正我这一句，比我自己猜十次都管用。'
@@ -137,13 +158,61 @@ const QUICK_MISS = '又偏了，你选你的。'
  */
 const PLEDGE_PICK = ['q3', 'q5', 'q9']
 
+/**
+ * 本子上那句「猜「…」」的短版。
+ *
+ * **从 onboardInterest.ask 派生，不再手写一份副本** —— 原来这里是硬编码的
+ * 「猜「你在家躺着刷手机」」，和 mockData 里的台词是两处独立维护的字符串。
+ * 改了台词忘了改这里，本子上就会记下一句同桌从没说过的话 ——
+ * 正是「同一件事在两处说法不一致」，而且藏得深、看起来还挺真。
+ */
+const GUESS_SHORT = onboardInterest.ask.replace(/[。，]?\s*猜得准吗？?\s*$/, '')
+
 /** 兴趣关键词兜底：学生说「在家躺着」时，也要能落到「休息」这个情境上 */
 const INTEREST_WORDS: { tag: string; words: string[] }[] = [
   { tag: '篮球', words: ['篮球', '打球', '球场'] },
   { tag: '游戏', words: ['游戏', '开黑', '手游'] },
   { tag: '动漫', words: ['动漫', '动画', '漫画', '画画'] },
-  { tag: '休息', words: ['休息', '躺着', '睡觉', '宅', '刷手机', '发呆'] },
+  { tag: '休息', words: ['休息', '躺着', '睡觉', '宅', '发呆', '歇着', '歇'] },
 ]
+
+/**
+ * 从学生那句话里把名字抠出来。
+ *
+ * 「我叫小明」「我是小明」「小明」都要能落到「小明」。
+ * 抠不出来就返回空串 —— **宁可不显示，也不能把「我叫」当成名字写到本子上**。
+ *
+ * ── 2026-09-13 修：长度阈值原来是 8，挡不住它自己举的那个例子 ──
+ * 原注释写「长度上限 8 是为了挡住『我叫小明我今年初三』」，
+ * 但剥掉「我叫」之后剩「小明我今年初三」= **7 个字，照样过**。
+ * 注释承诺的和代码做的不是一回事。
+ *
+ * 而且整句长度本来就不是判断名字的好尺子 —— 名字的特征是
+ * **短 + 字符集受限**，不是「字数少」。所以改成两道：
+ *   ① 长度 ≤ 6（中文名 2~4 字，小名/昵称到 5 顶天）
+ *   ② 不含一眼不是名字的字（我你他年月岁级班叫…）
+ * 于是「小明我今年初三」（7 字）被①挡掉、「我不告诉你」被②挡掉。
+ *
+ * ⚠️ 别把这两道说成能判断「是不是人名」：**「我是初三」剥完剩「初三」，
+ *    照样会当名字收下。** 停用字表只能列确定的非名字字，
+ *    再往下加（初一二三四…高）就会误伤真名字 —— 高、一、三都是常见姓氏/名字用字。
+ *    「宁可不显示也不写错」这条线，靠这两道只能做到这个程度。
+ *    真跑由模型做抽取，演示时学生说的是「我叫小明」。
+ */
+const NOT_A_NAME = /[我你他她它年月岁级班校老师叫名谁吗呢吧的了是在有和]/
+
+function cleanName(raw: string): string {
+  let s = raw.trim()
+  // 去掉首尾标点和空白
+  s = s.replace(/^[\s，,。！？!?、]+|[\s，,。！？!?、]+$/g, '')
+  // 去掉自我介绍的壳
+  s = s.replace(/^(我叫|我的名字是|我的名字叫|我是|名字叫|叫)/, '')
+  s = s.replace(/^[\s，,。！？!?、]+|[\s，,。！？!?、]+$/g, '')
+  s = s.replace(/(同学|小朋友|啦|呀|哦|噢)$/, '')
+  if (s.length === 0 || s.length > 6) return ''
+  if (NOT_A_NAME.test(s)) return ''
+  return s
+}
 
 /**
  * 字面重合度：原型里用这个判断学生说的是哪一句（真跑由 LLM 做）。
@@ -219,7 +288,13 @@ function tallyTraits(answers: (0 | 1)[]): ProfileTrait[] {
 
 export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
   const [lines, setLines] = useState<Line[]>([])
-  const [stage, setStage] = useState<Stage>('interest')
+  const [stage, setStage] = useState<Stage>('name')
+  /**
+   * 学生报的名字。只用来**写字**，不用来**念** ——
+   * 带名字的台词没法预渲染（见 say 的说明），所以它只落在气泡和本子上。
+   * 抠不出来时是空串，此时所有带名字的显示都要退化成不带名字的版本。
+   */
+  const [studentName, setStudentName] = useState('')
   /** 当前问到第几道快问快答 */
   const [qi, setQi] = useState(0)
   /** 每道快问快答选了哪个（下标 = quickQuestions 的下标） */
@@ -235,7 +310,7 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
   /** 同桌在这一题猜了第几个；没猜就是 null */
   const [guessPick, setGuessPick] = useState<0 | 1 | null>(null)
 
-  const { speak, stop, muted, setMuted, ttsReady } = useSpeech()
+  const { speak, stop, muted, setMuted, canSpeak } = useSpeech()
   const { listen } = useListening()
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -252,6 +327,16 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
   const guessRef = useRef<0 | 1 | null>(null)
   /** 兴趣：第一步采到的 tag，交给画像页 */
   const [interest, setInterest] = useState<string | null>(null)
+  /** 正在离开这一屏（去画像页）。这是 disabled 唯一该表示的意思 */
+  const [leaving, setLeaving] = useState(false)
+  /**
+   * 开场那句「我先猜 ——」说出口了没有。
+   *
+   * 学生可以在同桌还没说出这一猜之前就抢话。要是直接往下走，
+   * 本子上会记一条「猜「…」」（内容取自 GUESS_SHORT），而学生压根没听到过这句 ——
+   * 界面记了一件没发生过的事。所以抢话时补说这一句。
+   */
+  const guessedRef = useRef(false)
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
@@ -274,9 +359,25 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
 
   const alive = (id: number) => runRef.current === id
 
-  const say = async (text: string, id: number) => {
+  /**
+   * 同桌说一句。
+   *
+   * text 是**念出来的话**，同时也是音频文件的哈希键 —— 它必须是静态的，
+   * 否则预渲染不出来（见 scripts/gen-voice.mjs 顶部）。
+   * display 是**气泡上显示的字**，可以不等于 text。
+   *
+   * ── 为什么需要这个口子 ──────────────────────────────────────
+   * 学生报上名字之后，同桌得接一句带名字的话（「记住了 —— 小明」）。
+   * 但带名字的台词有无限多种，不可能给每个名字预渲染一条音频。
+   * 于是拆开：**念**的是静态的「好名字，记住了」，**写**的是带名字那句。
+   * 声画信息量不同，但不矛盾 —— 不会出现「说的和写的对不上」。
+   * （这是和秦肖定的「丙案」。甲案是干脆不问名字，乙案是让这一句
+   *   掉回浏览器语音、音色当场突变 —— 两句都在建立好感的关键位置，
+   *   所以选了代价最小的这条。）
+   */
+  const say = async (text: string, id: number, display?: string) => {
     if (!alive(id)) return
-    setLines(l => [...l, { k: 'ai', text }])
+    setLines(l => [...l, { k: 'ai', text: display ?? text }])
     await speak(text)
     if (!alive(id)) return
     await wait(300)
@@ -285,18 +386,106 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
   /** 本子上落一行 */
   const addNote = (n: Note) => setNotes(l => [...l, n])
 
-  /** 开场：同桌先开口，然后硬猜第一个（不是第一个问题） */
+  /**
+   * 开场：先互相认识，再硬猜。
+   *
+   * ── 为什么补「自报家门 + 问名字」这两步 ────────────────────
+   * 原来开场是：一句产品隐喻 → 立刻硬猜你周末干嘛。
+   * 同桌对自己**零暴露**，却马上开始采集你 —— 秦肖的原话是「太人机」。
+   * 真人第一次见面不这样：先说我是谁、我喜欢什么，再问你是谁。
+   * 所以照这个顺序补上，硬猜挪到名字之后 —— 认识了，再让人家纠正你。
+   */
   const intro = async () => {
     const id = ++runRef.current
     await say('嗨，我是你的新同桌。开学第一天，这本本子还是空的 —— 以后你和我都写在这儿。', id)
-    await say(`先不问你，我先猜 —— ${onboardInterest.ask}`, id)
+    if (!alive(id)) return // 学生抢话了，开场白到此为止
+    await say(
+      `对了，我叫${TONGZHUO_NAME} —— 挺喜欢数学和物理的，尤其是「想不通、突然想通」那一下。`,
+      id,
+    )
     if (!alive(id)) return
+    await say('你呢，你叫什么？', id)
+    if (!alive(id)) return
+    setStage('name')
     setPhase('waiting')
   }
 
-  /** 第 1 步：学生纠正同桌 → 本子记两行 → 采到兴趣 */
+  /** 名字走完才轮到硬猜 */
+  const doGuess = async (id: number) => {
+    // 原来这句是「先不问你，我先猜」—— 前面刚问完名字，再说「先不问你」就接不上了。
+    // 改成「你的兴趣我先不问了」，指代明确：刚问了名字，现在先不问兴趣。
+    await say(`你的兴趣我先不问了 —— 我先猜一个：${onboardInterest.ask}`, id)
+    if (!alive(id)) return
+    guessedRef.current = true
+    setStage('interest')
+    setPhase('waiting')
+  }
+
+  /**
+   * 第 0 步：问名字。
+   *
+   * 抢话处理和 onSayInterest 同源 —— 同桌说话时学生本来就能打断，
+   * 这条规则不因为换了一步就变。
+   */
+  const onSayName = async (typed?: string) => {
+    if (leaving) return
+    if (stage !== 'name') return
+    if (phase === 'busy') {
+      runRef.current++ // 让在飞的 intro / say 全部失效
+      stop() // 掐掉正在说的那句
+    }
+    const id = runRef.current
+    setPhase('busy')
+
+    let text: string
+    let simulated = false
+    if (typed !== undefined) {
+      text = typed.trim()
+    } else {
+      // 名字不是选择题，没有选项可点；演示时用一句预设的自我报名顶上
+      const r = await listen(`我叫${DEMO_STUDENT_NAME}`)
+      if (!alive(id)) return
+      text = r.text.trim()
+      simulated = !r.real
+    }
+
+    if (!text) {
+      await say('没听清，你再说一遍？', id)
+      if (alive(id)) setPhase('waiting')
+      return
+    }
+
+    const nm = cleanName(text)
+    setStudentName(nm)
+    setLines(l => [...l, { k: 'me', text, via: typed === undefined ? 'voice' : 'typed', simulated }])
+
+    // 丙案：念的是静态句（能预渲染），写的是带名字那句 —— 名字只进文字，不进音频
+    await say('好名字，记住了。', id, nm ? `好名字，记住了 —— ${nm}。` : '好名字，记住了。')
+    if (!alive(id)) return
+    // 本子的第一行就是学生的名字：这本本子是从「你」开始的
+    if (nm) addNote({ kind: '观察', text: `名字：${nm}` })
+    await doGuess(id)
+  }
+
+  /**
+   * 第 1 步：学生纠正同桌 → 本子记两行 → 采到兴趣
+   *
+   * ── 为什么这里要允许「抢话」────────────────────────────────
+   * 原来第一行是 `if (phase !== 'waiting') return` —— 配合按钮上的
+   * `disabled={phase !== 'waiting'}`，等于**整个开场白期间麦克风是死的**
+   * （phase 初值就是 'busy'）。秦肖连着三次反馈「冷启动阶段根本没法说话」，
+   * 根因就在这两行。
+   *
+   * 对话不是单向广播：真人同桌说话时你本来就能打断。现在抢话会作废
+   * 开场白剩下的句子、掐掉正在说的那句，然后正常走后面的流程。
+   */
   const onSayInterest = async (typed?: string) => {
-    if (phase !== 'waiting' || stage !== 'interest') return
+    if (leaving) return
+    if (stage !== 'interest') return
+    if (phase === 'busy') {
+      runRef.current++ // 让在飞的 intro / say 全部失效
+      stop() // 掐掉正在说的那句
+    }
     const id = runRef.current
     setPhase('busy')
 
@@ -326,9 +515,18 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
       { k: 'me', text: said, via: typed === undefined ? 'voice' : 'typed', simulated },
     ])
 
+    // 学生抢在「我先猜」之前开了口 —— 补说这一句再往下走。
+    // 顺序是「学生先说 → 同桌再猜」，跟他实际经历的时间顺序一致。
+    // 不补的话，下面那条「猜」的笔记和后面的判定都指向一句没说过的话。
+    if (!guessedRef.current) {
+      guessedRef.current = true
+      await say(`等下，我先猜一个 —— ${onboardInterest.ask}`, id)
+      if (!alive(id)) return
+    }
+
     // 本子上先记同桌这一猜中没中 —— 偏了也照写，不藏
     const hit = res.i !== null && res.i === 3
-    addNote({ kind: '猜', text: '猜「你在家躺着刷手机」', hit })
+    addNote({ kind: '猜', text: `猜「${GUESS_SHORT}」`, hit })
     addNote({ kind: '观察', text: `周末：${shortOf(said)}` })
     memRef.current = [...memRef.current, { short: shortOf(said), text: said, tag: res.tag }]
     if (res.tag) setInterest(res.tag)
@@ -361,22 +559,18 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
     setGuessPick(null)
 
     if (q.guess) {
-      const g = q.guess
-      // 'echo' = 跟上一题选同一个下标。同维度相邻两题用它 —— 这是同桌真的在往下推
-      const pick: 0 | 1 =
-        g.pick === 'echo'
-          ? ((answersRef.current[i - 1] ?? 0) as 0 | 1)
-          : g.pick
-
-      let line: string
-      if (g.blind) {
-        line = `第 ${i + 1} 题。我手上还是一点线索都没有，硬猜一个 —— 我猜你选「${q.choices[pick]}」。你选你的，别管我。`
-      } else {
-        const last = quickQuestions[i - 1]
-        const lastPick = answersRef.current[i - 1]
-        const lastText = last && lastPick !== undefined ? `「${last.choices[lastPick]}」` : '你上一题那个选法'
-        line = `你上一题选的是${lastText} —— 同一类事，我往下猜：这题你还是「${q.choices[pick]}」。`
-      }
+      /*
+       * 这句「猜测台词」的拼装搬去了 mockData 的 quickGuessLine()。
+       *
+       * 为什么：这句是按数据现拼的，而**生成音频的脚本必须能把它穷举出来**，
+       * 否则某些分支就没有预渲染音频，一到那儿就掉回浏览器机器音。
+       * 2026-09-13 实测踩到两次：兴趣标签那句（4 个 tag 只有 1 个有声），
+       * 和这里的猜句（5 个变体只有 3 个有声）。
+       * 放在 mockData 里，前端和 gen-voice 读同一份逻辑，就不会再各拼各的。
+       */
+      const pick = quickGuessPick(i, answersRef.current[i - 1])
+      const line = quickGuessLine(i, answersRef.current[i - 1])
+      if (!line) return
       guessRef.current = pick
       setGuessPick(pick)
       await say(line, id)
@@ -465,7 +659,7 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
           aria-label={muted ? '打开同桌的声音' : '静音'}
         >
           {muted ? <IconSoundOff className="w-3.5 h-3.5" /> : <IconSound className="w-3.5 h-3.5" />}
-          {muted ? '已静音' : ttsReady ? '同桌有声' : '字幕模式'}
+          {muted ? '已静音' : canSpeak ? '同桌有声' : '字幕模式'}
         </button>
         <button
           onClick={() => setShowCore(v => !v)}
@@ -482,8 +676,10 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
         {/* 同首页：38px 用 A 版，状态由右侧文字承担 */}
         <ClassmateAvatarV2 mood={phase === 'busy' ? 'explaining' : 'listening'} size={38} roleId={roleId} variant="A" />
         <span className="text-[14px] font-bold text-ink-900">你的同桌</span>
-        <span className="chip bg-brand-50 text-brand-700 text-[10.5px]">
-          {avatarRoles.find(r => r.id === roleId)?.name}
+        {/* 名字固定是小元（方案 A）；形象只决定「长什么样」，所以旁边挂的是风格不是名字 */}
+        <span className="chip bg-brand-50 text-brand-700 text-[10.5px]">{TONGZHUO_NAME}</span>
+        <span className="chip bg-ink-100 text-ink-500 text-[10.5px]">
+          {avatarRoles.find(r => r.id === roleId)?.style}
         </span>
         <span className="ml-auto text-[11.5px] text-ink-400 truncate">
           {phase === 'busy' ? '正在说…' : '第一次见面'}
@@ -518,11 +714,30 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
                 text={
                   stage === 'quick' && q
                     ? `大五 · ${q.dimension} → ${traitUsage[q.dimension] ?? ''}（第 ${qi + 1} / ${quickQuestions.length} 题）`
-                    : stage === 'interest'
-                      ? onboardInterest.measures
-                      : onboardAvatar.measures
+                    : stage === 'name'
+                      ? studentName
+                        ? `${NAME_MEASURES}｜已采到：${studentName}`
+                        : NAME_MEASURES
+                      : stage === 'interest'
+                        ? onboardInterest.measures
+                        : onboardAvatar.measures
                 }
               />
+            )}
+
+            {/* ── 第 0 步：问名字 ──────────────────────────────────
+                名字不是选择题，没有「你可以这样说」的选项列表，
+                只留一句演示用的示范 —— 说 / 点 / 写三条通道照旧都通。 */}
+            {stage === 'name' && (
+              <div className="pt-3 border-t border-dashed border-ink-200/80">
+                <TalkButton
+                  onSay={onSayName}
+                  disabled={leaving}
+                  speaking={phase === 'busy'}
+                  hint="按住说名字"
+                  suggestions={[`我叫${DEMO_STUDENT_NAME}`]}
+                />
+              </div>
             )}
 
             {/* ── 第 1 步：兴趣。说 / 点 / 写三条等价通道 ────────── */}
@@ -530,7 +745,14 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
               <div className="pt-3 border-t border-dashed border-ink-200/80">
                 <TalkButton
                   onSay={onSayInterest}
-                  disabled={phase !== 'waiting'}
+                  /*
+                   * disabled 只表示「正在离开这一屏」。
+                   * 「同桌正在说」交给 speaking —— 它只改提示语和配色，不关门。
+                   * 原来传的是 `phase !== 'waiting'`：phase 初值就是 'busy'，
+                   * 于是开场白那十几秒麦克风全程是灰的，按都按不动。
+                   */
+                  disabled={leaving}
+                  speaking={phase === 'busy'}
                   hint="按住说话"
                   suggestions={(onboardInterest.options ?? []).map(o => o.label)}
                 />
@@ -561,7 +783,7 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
                       key={r.id}
                       onClick={() => {
                         onPickRole(r.id)
-                        addNote({ kind: '观察', text: `形象挑了「${r.name}」` })
+                        addNote({ kind: '观察', text: `形象挑了「${r.style}」` })
                       }}
                       className={`tap flex-col gap-1 rounded-2xl border-2 py-2 transition ${
                         roleId === r.id ? 'border-brand-500 bg-brand-50' : 'border-ink-100 bg-white'
@@ -569,17 +791,30 @@ export default function Onboarding({ roleId, onPickRole, onDone }: Props) {
                     >
                       {/* 角色选择：8 个并排，加符号会互相打架，用 A 版展示「长相」就够了 */}
                       <ClassmateAvatarV2 mood="listening" size={40} roleId={r.id} variant="A" />
-                      <span className="text-[11.5px] font-semibold text-ink-800">{r.name}</span>
-                      <span className="text-[10px] text-ink-400 leading-tight">{r.style}</span>
+                      {/* 只显示风格，不显示「阿橙」这类名字 —— 名字固定是小元，
+                          这里摆个别的名字会让学生以为挑的是「换一个人」 */}
+                      <span className="text-[11px] font-semibold text-ink-800 leading-tight">
+                        {r.style}
+                      </span>
                     </button>
                   ))}
                 </div>
                 <div className="rounded-xl bg-brand-50 border border-brand-100 px-3 py-2 mt-2.5">
                   <p className="text-[11.5px] text-brand-700 leading-relaxed">
-                    换形象只换外壳。8 个形象背后是同一套引导逻辑、同一份学情数据，随时能换回来。
+                    换形象只换长相 —— 名字一直是{TONGZHUO_NAME}。8 个形象背后是同一套引导逻辑、
+                    同一份学情数据，随时能换回来。
                   </p>
                 </div>
-                <button onClick={() => setShowProfile(true)} className="btn-primary w-full h-12 text-[15px] mt-3">
+                <button
+                  onClick={() => {
+                    // 离开这一屏：先把还在说的那句掐掉，再把麦克风关上 ——
+                    // 否则翻页之后同桌的声音还在后台把上一句念完
+                    setLeaving(true)
+                    stop()
+                    setShowProfile(true)
+                  }}
+                  className="btn-primary w-full h-12 text-[15px] mt-3"
+                >
                   就是你了，走吧
                 </button>
               </div>
@@ -810,7 +1045,6 @@ function ProfilePage({
   interest: string | null
   onDone: () => void
 }) {
-  const role = avatarRoles.find(r => r.id === roleId)
   const traits = tallyTraits(answers)
 
   return (
@@ -826,7 +1060,7 @@ function ProfilePage({
         {/* 冷启动结束的庆祝时刻：56px 够大，用 B 版把「高兴」拉满 */}
         <ClassmateAvatarV2 mood="happy" size={56} roleId={roleId} variant="B" className="shrink-0" />
         <div className="min-w-0">
-          <div className="text-[16px] font-bold text-ink-900">认识完了，我是{role?.name}</div>
+          <div className="text-[16px] font-bold text-ink-900">认识完了，我是{TONGZHUO_NAME}</div>
           <p className="text-[12.5px] text-ink-500 leading-relaxed mt-0.5">
             以后你的数学和物理，我陪你一起弄。
           </p>

@@ -3,12 +3,40 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>初中数理成长导师 · 可交互原型</title>
+    <title>初中数理成长导师 · 可交互原型（v1 存档版）</title>
     <meta name="description" content="每个孩子都能拥有的专属初中数理成长导师 —— 学生端 AI 学霸同学 / 家长端 AI 家教" />
     <script type="module" crossorigin src="./assets/index-DiyRp61h.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/index-CgfDB_E8.css">
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      ── v1 存档标识（面试对比用）──────────────────────────────
+      直接写在 HTML 里、**不进应用包**，理由有两个：
+        1. v1 的 JS/CSS 必须和冻结那一刻完全一致，加标识不能动到它们；
+        2. 让人一眼看出这是存档版 —— 面试官自己打开时不会和最新版搞混。
+
+      放在正常文档流的最前面（不是 fixed 浮层）：浮层会盖住左侧导航或
+      底部的演示控制条，而这两块都是要给人点的。代价只是页面多约 34px 滚动。
+
+      ⚠️ 这段是**手工加在构建产物上的**。如果将来重新跑
+      `cp -r dist/. docs/v1/`，它会被覆盖掉 —— 但 v1 是冻结版本，正常不会再构建。
+    -->
+    <div
+      style="
+        background: #111827;
+        color: #ffffff;
+        padding: 7px 16px;
+        font: 12.5px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Microsoft YaHei', sans-serif;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 4px 12px;
+      "
+    >
+      <strong style="letter-spacing: 0.3px">v1 · 存档版</strong>
+      <span style="opacity: 0.72">教学内核：口诀灌输，无机制图解</span>
+      <a href="../" style="color: #7cc4ff; text-decoration: underline; margin-left: auto">对比最新版 →</a>
+    </div>
+    <div id="root"></div>
   </body>
 </html>
