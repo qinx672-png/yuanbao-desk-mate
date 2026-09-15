@@ -62,6 +62,15 @@ export function useSpeech() {
   const [muted, setMuted] = useState(false)
   const [speaking, setSpeaking] = useState(false)
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null)
+  /**
+   * 「轮到第几句了」。stop() 时 +1，作废掉所有还在飞的 speak()。
+   *
+   * 为什么需要它：speak() 里有 await（取 manifest、等音频播完），
+   * 学生完全可能在这中间就抢话或离开这一屏。没有这道闸，一个已经
+   * 作废的 speak() 会在 await 回来之后接着往下走、接着出声 ——
+   * 上一屏的话就这样漏进了下一屏。
+   */
+  const sessionRef = useRef(0)
 
   // 预渲染音频有没有到位。界面用它决定说「同桌有声」还是「字幕模式」——
   // 不能再看 ttsReady（那只是「这台机器装没装中文语音」，装没装都还有 mp3）
@@ -128,6 +137,10 @@ export function useSpeech() {
    *
    * 顺序：预渲染 mp3 → 浏览器语音 → 静停（按字数估）。
    * 只有 muted 是「不出声」，其余每一档都尽量出声。
+   *
+   * ⚠️ 唯一**不**往下走的例外：这一句被 stop() 掐断了。掐断＝闭嘴，
+   * 不是「播不出来」—— 退回浏览器语音等于把刚掐掉的话重念一遍
+   * （2026-09-15 修的双重播报就是这条）。见 lib/voiceClip.ts 的 ClipResult。
    */
   const speak = useCallback(
     async (text: string) => {
@@ -136,12 +149,17 @@ export function useSpeech() {
         return
       }
 
+      const session = sessionRef.current
       setSpeaking(true)
       try {
         // ① 预渲染音频（正式效果）
         const url = await clipUrlFor(text)
+        if (session !== sessionRef.current) return // 取 manifest 的工夫被 stop 了
         if (url) {
-          if (await playClip(url, text.length)) return
+          const r = await playClip(url, text.length)
+          // 'played'＝播完了；'interrupted'＝被掐断了（学生抢话 / 离开这一屏）。
+          // **两种都到此为止** —— 尤其被打断那种，再念一遍就是把刚掐掉的话又说回去。
+          if (r !== 'failed') return
           // manifest 里在册、实际却播不出来 —— 文件被删过 / 格式不对。
           // 这类问题不报给收集口（那会往 voice-extra.json 里塞已有的句子），
           // 只打警告，让人去查文件本身。
@@ -150,6 +168,7 @@ export function useSpeech() {
           // ② 没有音频：记一笔待合成，并用浏览器语音把这一句顶上
           reportMissing(text)
         }
+        if (session !== sessionRef.current) return // 等音频的工夫被 stop 了
         await speakByBrowser(text)
       } finally {
         setSpeaking(false)
@@ -159,6 +178,7 @@ export function useSpeech() {
   )
 
   const stop = useCallback(() => {
+    sessionRef.current++ // 先作废在飞的 speak，再掐声音，顺序不能反
     stopClip()
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) window.speechSynthesis.cancel()
     setSpeaking(false)

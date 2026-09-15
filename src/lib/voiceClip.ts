@@ -128,7 +128,26 @@ export async function clipUrlFor(text: string): Promise<string | null> {
 
 let current: HTMLAudioElement | null = null
 /** 正在播的那句的收尾函数。掐断时必须调用它，否则 await 会永远挂住 */
-let currentFinish: ((ok: boolean) => void) | null = null
+let currentFinish: ((r: ClipResult) => void) | null = null
+
+/**
+ * 一句预渲染音频的结局。**是三种，不是两种** —— 本文件最容易搞错的就是这里。
+ *
+ *   'played'      真的播完了
+ *   'interrupted' 被下一句 / 离开这一屏**故意**掐断的
+ *   'failed'      文件坏了、或被浏览器自动播放策略拦了，压根没出声
+ *
+ * ⚠️ 前两种都「没播完」，但处置正好相反：
+ *   - 'failed'      该退回浏览器语音顶上，不然这句就哑了；
+ *   - 'interrupted' 绝对**不能**退回浏览器语音 —— 掐断的意思就是「闭嘴」，
+ *                   再念一遍等于把刚掐掉的话又说了出来。
+ *
+ * 2026-09-15 修的 bug：原来只用 boolean 表示，'interrupted' 被当成失败，
+ * 于是每次掐断都会用浏览器语音把刚掐掉那句重念一遍。而这句浏览器语音是
+ * 掐断**之后**才排队进 speechSynthesis 的 —— `stop()` 里的 cancel() 早跑完了，
+ * 没人能取消它。它会跟着学生进到下一屏，和下一句 mp3 叠着播＝双重播报。
+ */
+export type ClipResult = 'played' | 'interrupted' | 'failed'
 
 /**
  * 掐掉正在播的那句（学生插话 / 离开这一屏 / 换节点时调）。
@@ -152,13 +171,14 @@ export function stopClip(): void {
       /* 已经停了 */
     }
   }
-  // 返回 false ＝「这句没播完」，调用方据此决定要不要接着说话
-  fin?.(false)
+  // 报 'interrupted'（不是 'failed'）—— 调用方据此知道「这是故意掐的，
+  // 别再退回浏览器语音把这句话重念一遍」
+  fin?.('interrupted')
 }
 
 /**
- * 播一句预渲染音频。
- * 返回 true＝真的播了（会等到播完）；false＝没播成，调用方该退回浏览器语音。
+ * 播一句预渲染音频。会等到有结局才 resolve。
+ * 返回 'played'/'interrupted' 都不该再出声；只有 'failed' 才该退回浏览器语音。
  *
  * 自动播放限制：浏览器的规矩是「没被用户手势碰过的页面不许出声」。
  * 本原型里所有语音都由点击触发（点「学生端」/「进教室」/按住说话），
@@ -167,7 +187,7 @@ export function stopClip(): void {
  *
  * @param expectChars 原文字数，只用来估一个兜底时限（见下）。
  */
-export function playClip(url: string, expectChars = 20): Promise<boolean> {
+export function playClip(url: string, expectChars = 20): Promise<ClipResult> {
   return new Promise(resolve => {
     stopClip()
     const a = new Audio(url)
@@ -175,7 +195,7 @@ export function playClip(url: string, expectChars = 20): Promise<boolean> {
 
     let settled = false
     let guard = 0
-    const finish = (ok: boolean) => {
+    const finish = (r: ClipResult) => {
       if (settled) return
       settled = true
       window.clearTimeout(guard)
@@ -183,19 +203,20 @@ export function playClip(url: string, expectChars = 20): Promise<boolean> {
         current = null
         currentFinish = null
       }
-      if (!ok) {
+      // 只有「没播成」才需要主动停；被打断时 stopClip 已经 pause 过了
+      if (r === 'failed') {
         try {
           a.pause()
         } catch {
           /* 还没开始播 */
         }
       }
-      resolve(ok)
+      resolve(r)
     }
     currentFinish = finish
 
-    a.onended = () => finish(true)
-    a.onerror = () => finish(false)
+    a.onended = () => finish('played')
+    a.onerror = () => finish('failed')
     // 网络卡住时既没有 ended 也没有 error —— 会一路挂死，把整段对话
     // 卡在这一句上。所以按音频真实时长设个兜底闹钟。
     a.onloadedmetadata = () => {
@@ -203,10 +224,12 @@ export function playClip(url: string, expectChars = 20): Promise<boolean> {
       // duration 拿不到（流式 mp3 偶尔是 Infinity）就退回按字数估
       const est = ms > 0 ? ms : 700 + expectChars * 240
       window.clearTimeout(guard)
-      guard = window.setTimeout(() => finish(true), est + 2500)
+      // 闹钟到点＝「这么久了还没收到 ended，多半是流式 mp3 不给 onended」。
+      // 当它播完了 —— 这是兜底放行，不是失败，别再退回浏览器语音。
+      guard = window.setTimeout(() => finish('played'), est + 2500)
     }
 
-    a.play().catch(() => finish(false))
+    a.play().catch(() => finish('failed'))
   })
 }
 
